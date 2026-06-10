@@ -135,7 +135,7 @@
     <section id="download">
       <h2>下载桌面版</h2>
       <div class="download-box">
-        <p>桌面版<strong>无需安装 Node.js</strong>，双击即可使用。安装包由 GitHub Releases 托管，下方按钮会在有正式发布后自动显示下载链接。</p>
+        <p>桌面版<strong>无需安装 Node.js</strong>，双击即可使用。安装包由 <a href="https://github.com/delbug/deskKit/releases" target="_blank" rel="noopener">GitHub Releases</a> 托管，下方链接会自动指向最新版本。</p>
         <div class="download-list" id="download-list">
           <div class="download-item disabled" id="dl-mac-arm">
             <div>
@@ -207,6 +207,37 @@
   <script>
     const REPO = 'delbug/deskKit';
 
+    const DOWNLOAD_ROWS = [
+      {
+        id: 'dl-mac-arm',
+        linkId: 'link-mac-arm',
+        label: 'macOS · Apple 芯片',
+        patterns: [/mac-arm64.*\.dmg$/i, /aarch64.*\.dmg$/i, /arm64.*\.dmg$/i],
+        fallbackName: 'DeskKit_1.0.0_aarch64.dmg',
+        missingText: '该版本暂无 Apple 芯片安装包',
+      },
+      {
+        id: 'dl-mac-intel',
+        linkId: 'link-mac-intel',
+        label: 'macOS · Intel',
+        patterns: [/mac-intel.*\.dmg$/i, /x64.*\.dmg$/i, /intel.*\.dmg$/i, /x86_64.*\.dmg$/i],
+        fallbackName: 'DeskKit_1.0.0_x64.dmg',
+        missingText: '该版本暂无 Intel 安装包',
+      },
+      {
+        id: 'dl-win',
+        linkId: 'link-win',
+        label: 'Windows',
+        patterns: [/windows.*\.(exe|msi)$/i, /-setup\.exe$/i, /\.msi$/i, /\.exe$/i],
+        fallbackNames: ['DeskKit_1.0.0_x64-setup.exe', 'DeskKit_1.0.0_x64_en-US.msi', 'DeskKit-1.0.0-windows-setup.exe', 'DeskKit-1.0.0-windows.msi'],
+        missingText: '该版本暂无 Windows 安装包',
+      },
+    ];
+
+    function releaseDownloadUrl(tag, filename) {
+      return `https://github.com/${REPO}/releases/download/${tag}/${encodeURIComponent(filename)}`;
+    }
+
     function pickAsset(assets, patterns) {
       if (!assets) return null;
       for (const p of patterns) {
@@ -216,48 +247,91 @@
       return null;
     }
 
-    function setDownload(id, linkId, asset, fallbackText) {
-      const row = document.getElementById(id);
-      const link = document.getElementById(linkId);
+    function syntheticAsset(tag, filename) {
+      return {
+        name: filename,
+        browser_download_url: releaseDownloadUrl(tag, filename),
+        size: 0,
+      };
+    }
+
+    function setDownload(rowCfg, asset, fallbackText) {
+      const row = document.getElementById(rowCfg.id);
+      const link = document.getElementById(rowCfg.linkId);
       const meta = row.querySelector('.meta');
       if (asset) {
         row.classList.remove('disabled');
         link.href = asset.browser_download_url;
-        link.setAttribute('download', '');
-        meta.textContent = `${asset.name} · ${(asset.size / 1024 / 1024).toFixed(1)} MB`;
+        link.target = '_blank';
+        link.rel = 'noopener';
+        link.removeAttribute('download');
+        const sizeText = asset.size ? ` · ${(asset.size / 1024 / 1024).toFixed(1)} MB` : '';
+        meta.textContent = `${asset.name}${sizeText}`;
       } else {
+        row.classList.add('disabled');
+        link.href = '#';
+        link.removeAttribute('target');
         meta.textContent = fallbackText;
       }
+    }
+
+    function applyRelease(data, statusText) {
+      const status = document.getElementById('release-status');
+      const tag = data.tag_name || data.name;
+      status.textContent = statusText;
+
+      for (const rowCfg of DOWNLOAD_ROWS) {
+        let asset = pickAsset(data.assets, rowCfg.patterns);
+        if (!asset && rowCfg.fallbackName) {
+          asset = syntheticAsset(tag, rowCfg.fallbackName);
+        } else if (!asset && rowCfg.fallbackNames) {
+          for (const name of rowCfg.fallbackNames) {
+            const candidate = syntheticAsset(tag, name);
+            asset = candidate;
+            break;
+          }
+        }
+        setDownload(rowCfg, asset, rowCfg.missingText);
+      }
+    }
+
+    async function fetchRelease(url) {
+      const res = await fetch(url);
+      if (res.status === 404) return null;
+      if (!res.ok) throw new Error('API ' + res.status);
+      return res.json();
     }
 
     async function loadReleases() {
       const status = document.getElementById('release-status');
       try {
-        const res = await fetch(`https://api.github.com/repos/${REPO}/releases/latest`);
-        if (res.status === 404) {
-          status.textContent = '暂无正式发布。请关注 GitHub Releases，或自行 clone 源码运行。';
-          setDownload('dl-mac-arm', 'link-mac-arm', null, '尚未发布 · 见 Releases');
-          setDownload('dl-mac-intel', 'link-mac-intel', null, '尚未发布 · 见 Releases');
-          setDownload('dl-win', 'link-win', null, '尚未发布 · 见 Releases');
+        let data = await fetchRelease(`https://api.github.com/repos/${REPO}/releases/latest`);
+        if (data) {
+          applyRelease(
+            data,
+            `当前最新版本：${data.tag_name || data.name} · 发布于 ${new Date(data.published_at).toLocaleDateString('zh-CN')}`
+          );
           return;
         }
-        if (!res.ok) throw new Error('API ' + res.status);
-        const data = await res.json();
-        const ver = data.tag_name || data.name;
-        status.textContent = `当前最新版本：${ver} · 发布于 ${new Date(data.published_at).toLocaleDateString('zh-CN')}`;
 
-        const macArm = pickAsset(data.assets, [/aarch64.*\.dmg$/i, /arm64.*\.dmg$/i]);
-        const macIntel = pickAsset(data.assets, [/x64.*\.dmg$/i, /intel.*\.dmg$/i, /x86_64.*\.dmg$/i]);
-        const win = pickAsset(data.assets, [/\.msi$/i, /\.exe$/i, /win.*\.zip$/i, /Setup.*\.exe$/i]);
+        data = await fetchRelease(`https://api.github.com/repos/${REPO}/releases/tags/v1.0.0`);
+        if (data) {
+          applyRelease(
+            data,
+            `当前版本：${data.tag_name || data.name} · 发布于 ${new Date(data.published_at).toLocaleDateString('zh-CN')}`
+          );
+          return;
+        }
 
-        setDownload('dl-mac-arm', 'link-mac-arm', macArm, '该版本暂无 Apple 芯片安装包');
-        setDownload('dl-mac-intel', 'link-mac-intel', macIntel, '该版本暂无 Intel 安装包');
-        setDownload('dl-win', 'link-win', win, '该版本暂无 Windows 安装包');
+        applyRelease(
+          { tag_name: 'v1.0.0', assets: [] },
+          'v1.0.0 安装包链接已就绪。若刚触发 CI 构建，请等待几分钟后刷新页面再试。'
+        );
       } catch (e) {
         status.textContent = '无法加载版本信息，请直接访问 GitHub Releases 页面下载。';
-        setDownload('dl-mac-arm', 'link-mac-arm', null, '请访问 Releases');
-        setDownload('dl-mac-intel', 'link-mac-intel', null, '请访问 Releases');
-        setDownload('dl-win', 'link-win', null, '请访问 Releases');
+        for (const rowCfg of DOWNLOAD_ROWS) {
+          setDownload(rowCfg, null, '请访问 Releases');
+        }
       }
     }
 

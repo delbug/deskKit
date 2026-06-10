@@ -81,9 +81,21 @@ jobs:
           merge-multiple: true
 
       - name: Prepare release assets
+        env:
+          VERSION: ${{ github.ref_name }}
         run: |
           mkdir -p release-assets
-          find artifacts -type f \( -name '*.dmg' -o -name '*.exe' -o -name '*.msi' \) -exec cp {} release-assets/ \;
+          ver="${VERSION#v}"
+          while IFS= read -r -d '' f; do
+            case "$f" in
+              *aarch64*|*arm64*) cp "$f" "release-assets/DeskKit-${ver}-mac-arm64.dmg" ;;
+              *x64*|*x86_64*) cp "$f" "release-assets/DeskKit-${ver}-mac-intel.dmg" ;;
+            esac
+          done < <(find artifacts -type f -name '*.dmg' -print0)
+          exe="$(find artifacts -type f -name '*-setup.exe' -o -type f -name '*.exe' | head -1)"
+          msi="$(find artifacts -type f -name '*.msi' | head -1)"
+          if [ -n "$exe" ]; then cp "$exe" "release-assets/DeskKit-${ver}-windows-setup.exe"; fi
+          if [ -n "$msi" ]; then cp "$msi" "release-assets/DeskKit-${ver}-windows.msi"; fi
           ls -lh release-assets/
 
       - name: Create GitHub Release
