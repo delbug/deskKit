@@ -1,0 +1,267 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="description" content="DeskKit：文件夹对比同步、语雀导出、Confluence 格式转换等本地小工具（Tauri 版）" />
+  <title>DeskKit — 本地文件与文档工具集</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>⇄</text></svg>" />
+  <style>
+    :root {
+      --bg: #0f1419;
+      --surface: #1a2332;
+      --surface-2: #243044;
+      --border: #2d3f56;
+      --text: #e7edf5;
+      --muted: #8ba3bf;
+      --primary: #3b82f6;
+      --primary-hover: #2563eb;
+      --success: #22c55e;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'PingFang SC', 'Microsoft YaHei', sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.6;
+    }
+    a { color: #93c5fd; text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    .wrap { max-width: 960px; margin: 0 auto; padding: 0 24px 80px; }
+    header {
+      padding: 48px 0 32px;
+      border-bottom: 1px solid var(--border);
+      margin-bottom: 48px;
+    }
+    .brand { display: flex; align-items: center; gap: 12px; margin-bottom: 16px; }
+    .logo { font-size: 36px; }
+    h1 { font-size: 32px; font-weight: 700; letter-spacing: -0.02em; }
+    .tagline { color: var(--muted); font-size: 17px; margin-top: 8px; max-width: 640px; }
+    .badge {
+      display: inline-block; margin-top: 12px; padding: 4px 10px; border-radius: 999px;
+      font-size: 12px; font-weight: 600; background: var(--surface-2); color: #93c5fd;
+      border: 1px solid var(--border);
+    }
+    .hero-actions { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 24px; }
+    .btn {
+      display: inline-flex; align-items: center; gap: 8px;
+      padding: 12px 22px; border-radius: 10px; font-size: 15px; font-weight: 600;
+      border: none; cursor: pointer; text-decoration: none !important;
+      transition: background 0.15s, transform 0.1s;
+    }
+    .btn:active { transform: scale(0.98); }
+    .btn-primary { background: var(--primary); color: #fff; }
+    .btn-primary:hover { background: var(--primary-hover); }
+    .btn-ghost { background: var(--surface-2); color: var(--text); border: 1px solid var(--border); }
+    .btn-ghost:hover { background: var(--surface); }
+    section { margin-bottom: 48px; }
+    h2 { font-size: 22px; margin-bottom: 16px; padding-bottom: 8px; border-bottom: 1px solid var(--border); }
+    .cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 16px; }
+    .card {
+      background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 18px 20px;
+    }
+    .card h3 { font-size: 15px; margin-bottom: 8px; color: #93c5fd; }
+    .card p { font-size: 14px; color: var(--muted); }
+    .download-box {
+      background: linear-gradient(135deg, #1a2332 0%, #243044 100%);
+      border: 1px solid var(--border); border-radius: 14px; padding: 28px;
+    }
+    .download-box p { color: var(--muted); font-size: 14px; margin-bottom: 16px; }
+    .download-list { display: flex; flex-direction: column; gap: 10px; }
+    .download-item {
+      display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 10px;
+      padding: 14px 16px; background: var(--bg); border-radius: 10px; border: 1px solid var(--border);
+    }
+    .download-item span { font-size: 14px; }
+    .download-item .label { font-weight: 600; }
+    .download-item .meta { color: var(--muted); font-size: 13px; }
+    .download-item a.btn { padding: 8px 16px; font-size: 13px; }
+    .download-item.disabled { opacity: 0.55; }
+    .download-item.disabled a { pointer-events: none; opacity: 0.5; }
+    #release-status { font-size: 13px; color: var(--muted); margin-top: 12px; }
+    .steps { counter-reset: step; list-style: none; }
+    .steps li {
+      counter-increment: step; position: relative; padding-left: 36px; margin-bottom: 14px;
+      font-size: 14px; color: var(--muted);
+    }
+    .steps li::before {
+      content: counter(step); position: absolute; left: 0; top: 0;
+      width: 24px; height: 24px; line-height: 24px; text-align: center;
+      background: var(--surface-2); border-radius: 50%; font-size: 12px; font-weight: 700; color: var(--text);
+    }
+    footer {
+      margin-top: 64px; padding-top: 24px; border-top: 1px solid var(--border);
+      font-size: 13px; color: var(--muted); text-align: center;
+    }
+    code { background: var(--surface-2); padding: 2px 6px; border-radius: 4px; font-size: 13px; }
+    @media (max-width: 600px) {
+      h1 { font-size: 26px; }
+      .hero-actions { flex-direction: column; }
+      .hero-actions .btn { justify-content: center; }
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <header>
+      <div class="brand">
+        <span class="logo">⇄</span>
+        <h1>DeskKit</h1>
+      </div>
+      <p class="tagline">
+        本地小工具集：多文件夹对比与同步、语雀批量导出、Confluence 粘贴用 HTML、重复文件检测等。
+        基于 Tauri 2 + Rust，安装包更小、启动更快，数据保存在本机。
+      </p>
+      <span class="badge">Tauri 桌面版</span>
+      <div class="hero-actions">
+        <a class="btn btn-primary" href="#download">下载桌面版</a>
+        <a class="btn btn-ghost" href="https://github.com/delbug/deskKit" target="_blank" rel="noopener">GitHub 源码</a>
+        <a class="btn btn-ghost" href="https://github.com/delbug/deskKit/blob/main/docs/%E4%BD%BF%E7%94%A8%E4%B8%8E%E6%89%93%E5%8C%85%E6%95%99%E7%A8%8B.md" target="_blank" rel="noopener">使用文档</a>
+      </div>
+    </header>
+
+    <section>
+      <h2>功能模块</h2>
+      <div class="cards">
+        <div class="card"><h3>文件夹对比</h3><p>MD5 / 路径对比，主辅同步、并集、删除与移动。</p></div>
+        <div class="card"><h3>语雀导出</h3><p>Token 批量导出知识库，可选 Markdown / Confluence 网页 HTML。</p></div>
+        <div class="card"><h3>Confluence 转换</h3><p>Markdown 转 HTML / Word / MD，浏览器复制粘贴保留图片。</p></div>
+        <div class="card"><h3>重复文件</h3><p>递归扫描目录，按 MD5 找出重复项。</p></div>
+        <div class="card"><h3>批量重命名</h3><p>前缀后缀、替换、序号、清理非法字符。</p></div>
+        <div class="card"><h3>收藏管理</h3><p>保存常用文件夹组合，刷新后自动恢复。</p></div>
+      </div>
+    </section>
+
+    <section id="download">
+      <h2>下载桌面版</h2>
+      <div class="download-box">
+        <p>桌面版<strong>无需安装 Node.js</strong>，双击即可使用。安装包由 GitHub Releases 托管，下方按钮会在有正式发布后自动显示下载链接。</p>
+        <div class="download-list" id="download-list">
+          <div class="download-item disabled" id="dl-mac-arm">
+            <div>
+              <div class="label">macOS · Apple 芯片</div>
+              <div class="meta">.dmg · 加载中…</div>
+            </div>
+            <a class="btn btn-primary" href="#" id="link-mac-arm">下载</a>
+          </div>
+          <div class="download-item disabled" id="dl-mac-intel">
+            <div>
+              <div class="label">macOS · Intel</div>
+              <div class="meta">.dmg · 加载中…</div>
+            </div>
+            <a class="btn btn-primary" href="#" id="link-mac-intel">下载</a>
+          </div>
+          <div class="download-item disabled" id="dl-win">
+            <div>
+              <div class="label">Windows</div>
+              <div class="meta">.msi / .exe · 加载中…</div>
+            </div>
+            <a class="btn btn-primary" href="#" id="link-win">下载</a>
+          </div>
+        </div>
+        <p id="release-status">正在查询最新版本…</p>
+        <p style="margin-top:16px">
+          也可前往
+          <a href="https://github.com/delbug/deskKit/releases" target="_blank" rel="noopener">GitHub Releases</a>
+          查看所有历史版本。
+        </p>
+      </div>
+    </section>
+
+    <section>
+      <h2>开发者本地运行</h2>
+      <ol class="steps">
+        <li>安装 <a href="https://nodejs.org" target="_blank" rel="noopener">Node.js LTS</a> 与 <a href="https://www.rust-lang.org/tools/install" target="_blank" rel="noopener">Rust</a></li>
+        <li><code>git clone https://github.com/delbug/deskKit.git && cd deskKit</code></li>
+        <li><code>npm install && npm run tauri:dev</code></li>
+        <li>打包：<code>npm run tauri:build</code>（Mac 双架构：<code>npm run tauri:build:mac</code>）</li>
+      </ol>
+      <p style="margin-top:12px;font-size:14px;color:var(--muted)">
+        详细说明见仓库内
+        <a href="https://github.com/delbug/deskKit/blob/main/docs/%E4%BD%BF%E7%94%A8%E4%B8%8E%E6%89%93%E5%8C%85%E6%95%99%E7%A8%8B.md">使用与打包教程</a>。
+      </p>
+    </section>
+
+    <section>
+      <h2>反馈与联系</h2>
+      <p style="font-size:14px;color:var(--muted)">
+        使用中遇到 bug 或有建议，欢迎发邮件：
+        <a href="mailto:okwujiang@gmail.com">okwujiang@gmail.com</a>
+        （维护者：吴江）
+      </p>
+      <p style="font-size:14px;color:var(--muted);margin-top:8px">
+        也可在
+        <a href="https://github.com/delbug/deskKit/issues" target="_blank" rel="noopener">GitHub Issues</a>
+        提交问题。
+      </p>
+    </section>
+
+    <footer>
+      <p>
+        <a href="https://github.com/delbug/deskKit">delbug/deskKit</a>
+        · MIT 开源 · 语雀 API 使用须遵守语雀服务条款
+      </p>
+    </footer>
+  </div>
+
+  <script>
+    const REPO = 'delbug/deskKit';
+
+    function pickAsset(assets, patterns) {
+      if (!assets) return null;
+      for (const p of patterns) {
+        const found = assets.find((a) => p.test(a.name));
+        if (found) return found;
+      }
+      return null;
+    }
+
+    function setDownload(id, linkId, asset, fallbackText) {
+      const row = document.getElementById(id);
+      const link = document.getElementById(linkId);
+      const meta = row.querySelector('.meta');
+      if (asset) {
+        row.classList.remove('disabled');
+        link.href = asset.browser_download_url;
+        link.setAttribute('download', '');
+        meta.textContent = `${asset.name} · ${(asset.size / 1024 / 1024).toFixed(1)} MB`;
+      } else {
+        meta.textContent = fallbackText;
+      }
+    }
+
+    async function loadReleases() {
+      const status = document.getElementById('release-status');
+      try {
+        const res = await fetch(`https://api.github.com/repos/${REPO}/releases/latest`);
+        if (res.status === 404) {
+          status.textContent = '暂无正式发布。请关注 GitHub Releases，或自行 clone 源码运行。';
+          setDownload('dl-mac-arm', 'link-mac-arm', null, '尚未发布 · 见 Releases');
+          setDownload('dl-mac-intel', 'link-mac-intel', null, '尚未发布 · 见 Releases');
+          setDownload('dl-win', 'link-win', null, '尚未发布 · 见 Releases');
+          return;
+        }
+        if (!res.ok) throw new Error('API ' + res.status);
+        const data = await res.json();
+        const ver = data.tag_name || data.name;
+        status.textContent = `当前最新版本：${ver} · 发布于 ${new Date(data.published_at).toLocaleDateString('zh-CN')}`;
+
+        const macArm = pickAsset(data.assets, [/aarch64.*\.dmg$/i, /arm64.*\.dmg$/i]);
+        const macIntel = pickAsset(data.assets, [/x64.*\.dmg$/i, /intel.*\.dmg$/i, /x86_64.*\.dmg$/i]);
+        const win = pickAsset(data.assets, [/\.msi$/i, /\.exe$/i, /win.*\.zip$/i, /Setup.*\.exe$/i]);
+
+        setDownload('dl-mac-arm', 'link-mac-arm', macArm, '该版本暂无 Apple 芯片安装包');
+        setDownload('dl-mac-intel', 'link-mac-intel', macIntel, '该版本暂无 Intel 安装包');
+        setDownload('dl-win', 'link-win', win, '该版本暂无 Windows 安装包');
+      } catch (e) {
+        status.textContent = '无法加载版本信息，请直接访问 GitHub Releases 页面下载。';
+        setDownload('dl-mac-arm', 'link-mac-arm', null, '请访问 Releases');
+        setDownload('dl-mac-intel', 'link-mac-intel', null, '请访问 Releases');
+        setDownload('dl-win', 'link-win', null, '请访问 Releases');
+      }
+    }
+
+    loadReleases();
+  </script>
+</body>
+</html>
