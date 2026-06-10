@@ -24,7 +24,7 @@
 
 **使用者（已打包）**：双击 `DeskKit.app` 即可，详见 [使用与打包教程](./docs/使用与打包教程.md#一使用者安装与启动)。
 
-**开发者**：
+**开发者**（需 **Node.js 24+**，见 `.nvmrc`）：
 
 ```bash
 cd /Users/xiaojiang/web/deskKit
