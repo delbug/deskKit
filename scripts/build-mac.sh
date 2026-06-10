@@ -9,6 +9,10 @@ rustup target add aarch64-apple-darwin x86_64-apple-darwin 2>/dev/null || true
 echo "==> 构建前端"
 npm run build
 
+echo "==> 当前版本: $(node -p "require('./package.json').version")"
+echo "    （发版请用: npm run release:push  会自动 +1 并触发 CI）"
+echo ""
+
 echo "==> Mac M1 (arm64)"
 npx tauri build --target aarch64-apple-darwin
 

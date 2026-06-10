@@ -5,6 +5,8 @@ import type {
   CompareResult,
   DuplicateGroup,
   FavoriteItem,
+  FindFileEntry,
+  FindFilesMatchMode,
   FolderItem,
   RenamePlanItem,
   RenameRules,
@@ -129,6 +131,42 @@ export async function findDuplicates(rootPath: string, ignorePatterns?: string[]
   );
 }
 
+export async function findFiles(params: {
+  rootPath: string;
+  matchMode: FindFilesMatchMode;
+  pattern: string;
+  caseSensitive?: boolean;
+  matchFullPath?: boolean;
+  minSize?: number;
+  maxSize?: number;
+  ignorePatterns?: string[];
+}) {
+  const patterns = params.ignorePatterns ?? loadAppConfig().settings.ignorePatterns;
+  return invokeOk<{
+    files: FindFileEntry[];
+    stats: { count: number; totalBytes: number };
+  }>('find_files', {
+    params: {
+      rootPath: params.rootPath,
+      matchMode: params.matchMode,
+      pattern: params.pattern,
+      caseSensitive: params.caseSensitive ?? false,
+      matchFullPath: params.matchFullPath ?? false,
+      minSize: params.minSize,
+      maxSize: params.maxSize,
+      ignorePatterns: patterns,
+    },
+  });
+}
+
+export async function previewRenameSelected(params: {
+  rootPath: string;
+  relativePaths: string[];
+  rules: RenameRules;
+}) {
+  return invokeOk<{ plan: RenamePlanItem[]; stats: Record<string, number> }>('preview_rename_selected', params);
+}
+
 export function formatSize(bytes: number | null | undefined): string {
   if (bytes == null) return '—';
   if (bytes < 1024) return `${bytes} B`;
@@ -242,6 +280,8 @@ export async function exportYuqueBatch(params: {
   delayMaxSec?: number;
   useDocFolder?: boolean;
   stopOnError?: boolean;
+  exportOrder?: 'top-down' | 'bottom-up' | 'custom';
+  selectedSlugs?: string[];
 }) {
   const storedProgress = params.resume !== false ? loadYuqueProgress(params.url, params.saveDir) : null;
   const result = await invokeOk<{
@@ -280,6 +320,32 @@ export async function cancelYuqueExport(url: string, saveDir: string) {
 export async function resetYuqueExport(url: string, saveDir: string) {
   await invokeOk<{ cleared: boolean }>('reset_yuque_export', { url, saveDir });
   clearYuqueProgress(url, saveDir);
+}
+
+export async function importYuqueProgress(saveDir: string, progress: YuqueProgressState) {
+  return invokeOk<{ imported: boolean }>('import_yuque_progress', { saveDir, progress });
+}
+
+export async function pickSaveFile(defaultName?: string) {
+  const data = await invokeOk<{ cancelled?: boolean; path?: string }>('pick_save_file', {
+    defaultName: defaultName || undefined,
+  });
+  if (data.cancelled) return { cancelled: true as const, path: '' };
+  return { path: data.path || '' };
+}
+
+export async function pickOpenFile() {
+  const data = await invokeOk<{ cancelled?: boolean; path?: string }>('pick_open_file');
+  if (data.cancelled) return { cancelled: true as const, path: '' };
+  return { path: data.path || '' };
+}
+
+export async function writeTextFile(path: string, content: string) {
+  return invokeOk<{ path: string }>('write_text_file', { path, content });
+}
+
+export async function readTextFile(path: string) {
+  return invokeOk<{ content: string }>('read_text_file', { path });
 }
 
 export async function listConfluenceFiles(sourceDir: string, recursive = true) {

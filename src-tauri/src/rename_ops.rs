@@ -262,6 +262,23 @@ pub fn build_rename_plan(
     ignore_patterns: &[String],
 ) -> Vec<RenamePlanItem> {
     let entries = collect_entries(root, recursive, scope, ignore_patterns);
+    build_plan_from_entries(&entries, rules)
+}
+
+pub fn build_rename_plan_for_paths(
+    root: &Path,
+    relative_paths: &[String],
+    rules: &RenameRules,
+) -> Vec<RenamePlanItem> {
+    let selected: std::collections::HashSet<String> = relative_paths.iter().cloned().collect();
+    let entries: Vec<_> = collect_entries(root, true, "files", &[])
+        .into_iter()
+        .filter(|e| selected.contains(&e.relative_path))
+        .collect();
+    build_plan_from_entries(&entries, rules)
+}
+
+fn build_plan_from_entries(entries: &[RenameEntry], rules: &RenameRules) -> Vec<RenamePlanItem> {
     let mut plan = Vec::new();
     let mut used_names: HashMap<String, String> = HashMap::new();
 

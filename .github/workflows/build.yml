@@ -2,6 +2,16 @@ name: Build DeskKit
 
 on:
   workflow_dispatch:
+    inputs:
+      bump:
+        description: '发布时版本递增方式（patch=第三位+1）'
+        required: true
+        default: patch
+        type: choice
+        options:
+          - patch
+          - minor
+          - major
   push:
     tags:
       - 'v*'
@@ -10,10 +20,51 @@ permissions:
   contents: write
 
 jobs:
+  prepare-release:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.bump.outputs.version }}
+      tag: ${{ steps.bump.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+
+      - name: Bump version
+        id: bump
+        run: |
+          VERSION=$(node scripts/bump-version.mjs "${{ inputs.bump }}")
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "tag=v${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "Bumped to v${VERSION}"
+
+      - name: Commit and tag
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add package.json src-tauri/Cargo.toml src-tauri/tauri.conf.json src-tauri/Cargo.lock
+          git commit -m "chore: release ${{ steps.bump.outputs.tag }}"
+          git push origin HEAD
+          git tag "${{ steps.bump.outputs.tag }}"
+          git push origin "${{ steps.bump.outputs.tag }}"
+
   build-windows:
+    needs: [prepare-release]
+    if: |
+      always() && (
+        (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) ||
+        (github.event_name == 'workflow_dispatch' && needs.prepare-release.result == 'success')
+      )
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && needs.prepare-release.outputs.tag || github.ref }}
 
       - uses: actions/setup-node@v6
         with:
@@ -37,6 +88,12 @@ jobs:
             src-tauri/target/release/bundle/msi/*.msi
 
   build-mac:
+    needs: [prepare-release]
+    if: |
+      always() && (
+        (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) ||
+        (github.event_name == 'workflow_dispatch' && needs.prepare-release.result == 'success')
+      )
     strategy:
       matrix:
         include:
@@ -47,6 +104,8 @@ jobs:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && needs.prepare-release.outputs.tag || github.ref }}
 
       - uses: actions/setup-node@v6
         with:
@@ -71,8 +130,14 @@ jobs:
             src-tauri/target/${{ matrix.target }}/release/bundle/dmg/*.dmg
 
   release:
-    needs: [build-windows, build-mac]
-    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [prepare-release, build-windows, build-mac]
+    if: |
+      always() &&
+      needs.build-windows.result == 'success' &&
+      needs.build-mac.result == 'success' && (
+        (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) ||
+        (github.event_name == 'workflow_dispatch' && needs.prepare-release.result == 'success')
+      )
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v5
@@ -82,7 +147,7 @@ jobs:
 
       - name: Prepare release assets
         env:
-          VERSION: ${{ github.ref_name }}
+          VERSION: ${{ github.event_name == 'workflow_dispatch' && needs.prepare-release.outputs.tag || github.ref_name }}
         run: |
           mkdir -p release-assets
           ver="${VERSION#v}"
@@ -101,6 +166,7 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v3
         with:
+          tag_name: ${{ github.event_name == 'workflow_dispatch' && needs.prepare-release.outputs.tag || github.ref_name }}
           draft: false
           generate_release_notes: true
           files: release-assets/*

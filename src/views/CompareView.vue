@@ -10,19 +10,22 @@ import {
   moveFiles,
   pickFolder,
   previewSyncFolders,
-  saveFavorite,
   syncFolders,
   uid,
 } from '@/api';
-import SyncPreviewDialog from '@/components/SyncPreviewDialog.vue';
 import ClearCacheButton from '@/components/ClearCacheButton.vue';
+import FavoritePathInput from '@/components/FavoritePathInput.vue';
+import SyncPreviewDialog from '@/components/SyncPreviewDialog.vue';
 import { useConfig } from '@/composables/useConfig';
+import { useFavorites } from '@/composables/useFavorites';
 import { addRecentPath } from '@/utils/appStorage';
 import type { CompareMode, CompareResult, DiffEntry, FilterType, FolderItem, SyncPreviewOperation, SyncPreviewSummary, SyncStrategy } from '@/types';
+import type { FavoriteItem } from '@/types';
 
 const router = useRouter();
 const route = useRoute();
 const { config, load, saveLastSession, restoreFolders } = useConfig();
+const { favorites, load: loadFavorites, applyFavorite, addFavorite } = useFavorites();
 
 const folders = ref<FolderItem[]>(defaultFolders());
 const compareMode = ref<CompareMode>('md5');
@@ -91,18 +94,36 @@ const allSelected = computed(
 );
 
 onMounted(async () => {
+  await loadFavorites();
   await initFromConfig();
 });
 
 watch(() => route.path, async (p) => {
-  if (p === '/compare') await initFromConfig();
+  if (p === '/compare') {
+    await loadFavorites();
+    await initFromConfig();
+  }
 });
 
 async function initFromConfig() {
   await load();
   if (config.value?.settings?.compareMode) compareMode.value = config.value.settings.compareMode;
   const restored = restoreFolders();
-  if (restored) folders.value = restored;
+  if (restored) {
+    folders.value = restored;
+    if (config.value?.lastSession?.compareMode) {
+      compareMode.value = config.value.lastSession.compareMode;
+    }
+  }
+
+  const state = window.history.state as { autoCompare?: boolean } | null;
+  if (state?.autoCompare) {
+    window.history.replaceState({ ...window.history.state, autoCompare: false }, '');
+    const valid = folders.value.filter((f) => f.path.trim());
+    if (valid.length >= 2) {
+      await runCompare();
+    }
+  }
 }
 
 watch([folders, compareMode], () => {
@@ -202,24 +223,25 @@ async function runCompare() {
 }
 
 async function saveAsFavorite() {
-  const name = favName.value.trim() || `收藏 ${new Date().toLocaleString('zh-CN')}`;
+  const valid = folders.value.filter((f) => f.path.trim());
+  if (valid.length < 2) return ElMessage.warning('请先为至少 2 个文件夹选择路径');
   try {
-    await saveFavorite('add', {
-      id: uid(),
-      name,
+    await addFavorite({
+      name: favName.value.trim() || `收藏 ${new Date().toLocaleString('zh-CN')}`,
       folders: JSON.parse(JSON.stringify(folders.value)),
-      createdAt: new Date().toISOString(),
+      compareMode: compareMode.value,
     });
-    await load();
     favName.value = '';
-    ElMessage.success('已收藏，可在「收藏管理」查看');
+    ElMessage.success('已收藏，可在「收藏管理」或下方列表加载');
   } catch (err: any) {
     ElMessage.error(err.message);
   }
 }
 
-function loadFavoriteFromQuery() {
-  router.push('/favorites');
+async function onQuickLoadFavorite(fav: FavoriteItem) {
+  await applyFavorite(fav, { navigate: false, autoCompare: false });
+  await initFromConfig();
+  ElMessage.success(`已加载「${fav.name}」`);
 }
 
 function toggleSelectAll(checked: boolean) {
@@ -377,7 +399,31 @@ function handleClearCompare() {
             <div class="section-head">
               <h3 class="section-title">对比文件夹</h3>
               <div class="section-head-actions">
-                <el-button link type="primary" size="small" @click="loadFavoriteFromQuery">
+                <el-dropdown
+                  v-if="favorites.length"
+                  trigger="click"
+                  @command="(cmd: string) => {
+                    if (cmd === 'manage') router.push('/favorites');
+                    else {
+                      const fav = favorites.find((f) => f.id === cmd);
+                      if (fav) onQuickLoadFavorite(fav);
+                    }
+                  }"
+                >
+                  <el-button link type="primary" size="small">
+                    <el-icon><Star /></el-icon> 加载收藏
+                    <el-icon class="el-icon--right"><ArrowDown /></el-icon>
+                  </el-button>
+                  <template #dropdown>
+                    <el-dropdown-menu>
+                      <el-dropdown-item v-for="fav in favorites" :key="fav.id" :command="fav.id">
+                        {{ fav.name }}（{{ fav.folders.length }} 夹）
+                      </el-dropdown-item>
+                      <el-dropdown-item divided command="manage">管理收藏…</el-dropdown-item>
+                    </el-dropdown-menu>
+                  </template>
+                </el-dropdown>
+                <el-button v-else link type="primary" size="small" @click="router.push('/favorites')">
                   <el-icon><Star /></el-icon> 收藏
                 </el-button>
                 <ClearCacheButton module="compare" @cleared="handleClearCompare" />
@@ -404,18 +450,13 @@ function handleClearCompare() {
                     />
                     <span v-if="folder.isPrimary" class="primary-badge">主文件夹</span>
                   </div>
-                  <el-input
+                  <FavoritePathInput
                     v-model="folder.path"
                     size="small"
+                    placeholder="路径（可选择或从收藏选用）"
                     class="folder-path-input"
-                    placeholder="路径（可选择或手动输入）"
-                    clearable
-                    @clear="clearFolderPath(folder)"
                   />
                   <div class="folder-card-actions">
-                    <el-button size="small" class="folder-action-btn" @click="onPickFolder(folder)">
-                      <el-icon><Folder /></el-icon> 选择
-                    </el-button>
                     <el-button
                       size="small"
                       class="folder-action-btn"

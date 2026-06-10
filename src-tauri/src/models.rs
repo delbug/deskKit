@@ -283,6 +283,41 @@ pub struct DuplicateStats {
     pub wasted_bytes: u64,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FindFilesParams {
+    pub root_path: String,
+    #[serde(default)]
+    pub ignore_patterns: Vec<String>,
+    /// name | suffix | extension | regex
+    pub match_mode: String,
+    pub pattern: String,
+    #[serde(default)]
+    pub case_sensitive: bool,
+    #[serde(default)]
+    pub match_full_path: bool,
+    #[serde(default)]
+    pub min_size: Option<u64>,
+    #[serde(default)]
+    pub max_size: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FindFileEntry {
+    pub relative_path: String,
+    pub absolute_path: String,
+    pub size: u64,
+    pub mtime: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FindFilesStats {
+    pub count: usize,
+    pub total_bytes: u64,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum YuqueExportFormat {
@@ -339,6 +374,14 @@ pub struct YuqueBatchParams {
     pub delay_max_sec: u64,
     #[serde(default)]
     pub progress: Option<YuqueProgressState>,
+    #[serde(default = "default_export_order")]
+    pub export_order: String,
+    #[serde(default)]
+    pub selected_slugs: Option<Vec<String>>,
+}
+
+fn default_export_order() -> String {
+    "top-down".to_string()
 }
 
 fn default_delay_mode() -> String {
@@ -408,6 +451,10 @@ pub struct YuqueProgressState {
     pub started_at: Option<String>,
     #[serde(default)]
     pub updated_at: Option<String>,
+    #[serde(default)]
+    pub export_order: Option<String>,
+    #[serde(default)]
+    pub selected_slugs: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -459,6 +506,15 @@ pub struct HealthResponse {
     pub ok: bool,
     pub version: i32,
     pub features: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PickFileResponse {
+    #[serde(default)]
+    pub cancelled: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

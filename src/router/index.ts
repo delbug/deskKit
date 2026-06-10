@@ -8,6 +8,7 @@ const router = createRouter({
     { path: '/rename', name: 'rename', component: () => import('@/views/RenameView.vue'), meta: { title: '批量重命名' } },
     { path: '/favorites', name: 'favorites', component: () => import('@/views/FavoritesView.vue'), meta: { title: '收藏管理' } },
     { path: '/duplicates', name: 'duplicates', component: () => import('@/views/DuplicatesView.vue'), meta: { title: '重复文件' } },
+    { path: '/find-files', name: 'findFiles', component: () => import('@/views/FindFilesView.vue'), meta: { title: '查找文件' } },
     { path: '/yuque', name: 'yuque', component: () => import('@/views/YuqueView.vue'), meta: { title: '语雀导出' } },
     { path: '/confluence', name: 'confluence', component: () => import('@/views/ConfluenceView.vue'), meta: { title: 'Confluence 转换' } },
     { path: '/settings', name: 'settings', component: () => import('@/views/SettingsView.vue'), meta: { title: '设置' } },

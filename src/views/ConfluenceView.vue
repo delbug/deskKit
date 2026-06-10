@@ -3,6 +3,7 @@ import { computed, nextTick, onMounted, ref, watch } from 'vue';
 import { ElMessage } from 'element-plus';
 import type { ElTree } from 'element-plus';
 import ClearCacheButton from '@/components/ClearCacheButton.vue';
+import FavoritePathInput from '@/components/FavoritePathInput.vue';
 import {
   convertToConfluence,
   getHealth,
@@ -462,8 +463,7 @@ function handleClear() {
         <div class="field">
           <label>Markdown 源目录</label>
           <div class="path-row">
-            <el-input v-model="sourceDir" placeholder="选择语雀导出的文件夹" />
-            <el-button @click="pickSourceDir"><el-icon><Folder /></el-icon></el-button>
+            <FavoritePathInput v-model="sourceDir" placeholder="选择语雀导出的文件夹" />
             <el-button v-if="sourceDir" @click="openFolder(sourceDir)">打开</el-button>
           </div>
         </div>
@@ -482,8 +482,7 @@ function handleClear() {
           <label>输出位置</label>
           <el-checkbox v-model="sameDir">输出到源目录（同路径 {{ formatExt }}）</el-checkbox>
           <div v-if="!sameDir" class="path-row" style="margin-top:8px">
-            <el-input v-model="outputDir" :placeholder="`${formatLabel} 输出目录`" />
-            <el-button @click="pickOutputDir"><el-icon><Folder /></el-icon></el-button>
+            <FavoritePathInput v-model="outputDir" :placeholder="`${formatLabel} 输出目录`" />
             <el-button v-if="outputDir" @click="openFolder(outputDir)">打开</el-button>
           </div>
         </div>

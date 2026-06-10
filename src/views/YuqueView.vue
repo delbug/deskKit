@@ -2,12 +2,20 @@
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
 import { ElMessage, ElMessageBox } from 'element-plus';
 import YuqueExportTree from '@/components/YuqueExportTree.vue';
+import YuqueExportSelectTree from '@/components/YuqueExportSelectTree.vue';
 import ClearCacheButton from '@/components/ClearCacheButton.vue';
+import FavoritePathInput from '@/components/FavoritePathInput.vue';
+import FavoriteUrlInput from '@/components/FavoriteUrlInput.vue';
 import {
   exportYuque,
   exportYuqueBatch,
   cancelYuqueExport,
   resetYuqueExport,
+  importYuqueProgress,
+  pickSaveFile,
+  pickOpenFile,
+  writeTextFile,
+  readTextFile,
   fetchYuqueExportProgress,
   openFolder,
   pickFolder,
@@ -17,10 +25,18 @@ import {
 } from '@/api';
 import {
   buildDocTree,
+  filterDocsBySlugs,
   formatProgressBar,
   mergeDocProgress,
   type ExportProgressDetail,
 } from '@/utils/yuque-doc-tree';
+import {
+  buildYuqueSnapshot,
+  parseYuqueSnapshot,
+  snapshotToProgress,
+  type YuqueExportOrder,
+} from '@/utils/yuque-snapshot';
+import { saveYuqueProgress, loadYuqueProgress } from '@/utils/appStorage';
 import {
   YUQUE_DISCLAIMER_CONFIRM,
   YUQUE_DISCLAIMER_LINES,
@@ -40,6 +56,9 @@ const yuqueToken = ref('');
 const batchMode = computed(() => exportMode.value === 'batch');
 const useDocFolder = ref(false);
 const stopOnError = ref(true);
+const exportOrder = ref<YuqueExportOrder>('top-down');
+const selectedSlugs = ref<string[]>([]);
+const selectTreeRef = ref<InstanceType<typeof YuqueExportSelectTree>>();
 const delayMode = ref<'none' | 'fixed' | 'random'>('random');
 const delayFixedSec = ref(5);
 const delayMinSec = ref(3);
@@ -85,8 +104,13 @@ const docProgressList = computed(() => mergeDocProgress(bookCatalog.value, progr
 
 const docTree = computed(() => buildDocTree(docProgressList.value));
 
+const effectiveDocList = computed(() => {
+  if (exportOrder.value !== 'custom' || !batchMode.value) return docProgressList.value;
+  return filterDocsBySlugs(docProgressList.value, new Set(selectedSlugs.value));
+});
+
 const progressStats = computed(() => {
-  const list = docProgressList.value;
+  const list = effectiveDocList.value;
   const total = list.length || progressDetail.value?.total || bookPreview.value?.total || 0;
   const done = list.length
     ? list.filter((d) => d.status === 'done').length
@@ -187,6 +211,11 @@ function loadYuqueSettings() {
   if (savedStopOnError === '0') stopOnError.value = false;
   else if (savedStopOnError === '1') stopOnError.value = true;
 
+  const savedExportOrder = localStorage.getItem('yuque-export-order');
+  if (savedExportOrder === 'top-down' || savedExportOrder === 'bottom-up' || savedExportOrder === 'custom') {
+    exportOrder.value = savedExportOrder;
+  }
+
   const savedExportMd = localStorage.getItem('yuque-export-md');
   const savedExportHtml = localStorage.getItem('yuque-export-html');
   if (savedExportMd === '1' || savedExportMd === '0') {
@@ -234,6 +263,7 @@ function persistYuqueSettings() {
   localStorage.setItem('yuque-delay-max', String(delayMaxSec.value));
   localStorage.setItem('yuque-resume-export', resumeExport.value ? '1' : '0');
   localStorage.setItem('yuque-stop-on-error', stopOnError.value ? '1' : '0');
+  localStorage.setItem('yuque-export-order', exportOrder.value);
   localStorage.setItem('yuque-export-md', exportMd.value ? '1' : '0');
   localStorage.setItem('yuque-export-html', exportHtml.value ? '1' : '0');
 }
@@ -305,6 +335,13 @@ async function refreshProgressDetail() {
           bookDir: data.bookDir || '',
         };
       }
+      const p = data.progress;
+      if (p?.exportOrder === 'top-down' || p?.exportOrder === 'bottom-up' || p?.exportOrder === 'custom') {
+        exportOrder.value = p.exportOrder;
+      }
+      if (p?.selectedSlugs?.length) {
+        selectedSlugs.value = p.selectedSlugs;
+      }
     } else {
       progressDetail.value = null;
       exportProgress.value = null;
@@ -332,6 +369,9 @@ async function loadBookCatalog(silent = false) {
     const data = await previewYuqueBook(url, token || undefined);
     bookPreview.value = data;
     bookCatalog.value = data.docs;
+    if (!selectedSlugs.value.length) {
+      selectedSlugs.value = data.docs.map((d) => d.slug);
+    }
     await refreshProgressDetail();
     if (!silent) {
       persistAuthSettings();
@@ -373,6 +413,7 @@ watch(
     delayMaxSec,
     resumeExport,
     stopOnError,
+    exportOrder,
   ],
   () => persistYuqueSettings(),
 );
@@ -433,6 +474,8 @@ function handleClearYuque() {
   batchResult.value = null;
   exportProgress.value = null;
   pauseRequested.value = false;
+  exportOrder.value = 'top-down';
+  selectedSlugs.value = [];
   stopProgressPolling();
 }
 
@@ -447,6 +490,70 @@ async function handlePauseExport() {
   } catch (err: any) {
     pauseRequested.value = false;
     ElMessage.error(err.message || '暂停失败');
+  }
+}
+
+async function handleExportSnapshot() {
+  const url = shareUrl.value.trim();
+  if (!url) return ElMessage.warning('请先填写语雀链接');
+  if (!bookCatalog.value.length) {
+    await loadBookCatalog(true);
+  }
+  if (!bookCatalog.value.length) {
+    return ElMessage.warning('请先预览知识库以获取目录结构');
+  }
+  const safeName = progressBookName.value.replace(/[^\w\u4e00-\u9fff-]+/g, '_') || 'yuque';
+  const picked = await pickSaveFile(`${safeName}-deskit-snapshot.json`);
+  if (picked.cancelled || !picked.path) return;
+  try {
+    const dir = saveDir.value.trim();
+    const snapshot = buildYuqueSnapshot({
+      url,
+      authMode: authMode.value,
+      bookName: progressBookName.value,
+      saveDir: dir,
+      bookDir: progressDetail.value?.bookDir,
+      exportOrder: exportOrder.value,
+      selectedSlugs: exportOrder.value === 'custom' ? selectedSlugs.value : null,
+      catalog: bookCatalog.value,
+      docs: docProgressList.value,
+      tree: docTree.value,
+      progress: dir ? loadYuqueProgress(url, dir) : null,
+    });
+    await writeTextFile(picked.path, JSON.stringify(snapshot, null, 2));
+    ElMessage.success('知识库结构快照已保存');
+  } catch (err: any) {
+    ElMessage.error(err.message || '导出快照失败');
+  }
+}
+
+async function handleImportSnapshot() {
+  const picked = await pickOpenFile();
+  if (picked.cancelled || !picked.path) return;
+  try {
+    const content = await readTextFile(picked.path);
+    const snapshot = parseYuqueSnapshot(content.content);
+    shareUrl.value = snapshot.url;
+    if (snapshot.authMode) authMode.value = snapshot.authMode;
+    saveDir.value = snapshot.saveDir;
+    exportOrder.value = snapshot.exportOrder;
+    selectedSlugs.value = snapshot.selectedSlugs?.length
+      ? snapshot.selectedSlugs
+      : snapshot.catalog.map((d) => d.slug);
+    bookCatalog.value = snapshot.catalog;
+    bookPreview.value = {
+      bookName: snapshot.bookName,
+      total: snapshot.catalog.length,
+      docs: snapshot.catalog,
+    };
+    const progress = snapshotToProgress(snapshot);
+    saveYuqueProgress(snapshot.url, snapshot.saveDir, progress);
+    await importYuqueProgress(snapshot.saveDir, progress);
+    persistYuqueSettings();
+    await refreshProgressDetail();
+    ElMessage.success(`已导入「${snapshot.bookName}」结构快照（${snapshot.catalog.length} 篇）`);
+  } catch (err: any) {
+    ElMessage.error(err.message || '导入快照失败');
   }
 }
 
@@ -582,6 +689,12 @@ async function handleExport() {
         batchExportRunning.value = false;
         return;
       }
+      if (exportOrder.value === 'custom' && !selectedSlugs.value.length) {
+        ElMessage.warning('自定义导出请至少勾选一篇文档');
+        stopProgressPolling();
+        batchExportRunning.value = false;
+        return;
+      }
       const result = await exportYuqueBatch({
         url,
         saveDir: saveDir.value,
@@ -596,6 +709,8 @@ async function handleExport() {
         delayMaxSec: delayMaxSec.value,
         useDocFolder: useDocFolder.value,
         stopOnError: stopOnError.value,
+        exportOrder: exportOrder.value,
+        selectedSlugs: exportOrder.value === 'custom' ? selectedSlugs.value : undefined,
       });
       persistDelaySettings();
       persistAuthSettings();
@@ -728,10 +843,8 @@ async function handleExport() {
         <label>{{ batchMode && authMode === 'token' ? '语雀知识库链接' : '语雀分享链接' }}</label>
         <el-button v-if="shareUrl" link type="danger" @click="clearShareUrl">清空</el-button>
       </div>
-      <el-input
+      <FavoriteUrlInput
         v-model="shareUrl"
-        type="textarea"
-        :rows="3"
         :placeholder="batchMode && authMode === 'token'
           ? 'https://www.yuque.com/your-name/your-repo'
           : 'https://www.yuque.com/用户/知识库/任意文档?singleDoc'"
@@ -741,12 +854,8 @@ async function handleExport() {
     <div class="field row">
       <div class="grow">
         <label>保存目录</label>
-        <el-input v-model="saveDir" readonly placeholder="点击右侧按钮选择保存位置" />
+        <FavoritePathInput v-model="saveDir" placeholder="选择或输入保存位置" />
       </div>
-      <el-button @click="pickSaveDir">
-        <el-icon><Folder /></el-icon>
-        选择目录
-      </el-button>
       <el-button v-if="saveDir" @click="openFolder(saveDir)">在 Finder 打开</el-button>
     </div>
 
@@ -844,8 +953,44 @@ async function handleExport() {
         {{ batchMode ? '每篇使用独立子文件夹（标题/标题.md + assets/）' : '单篇也使用独立文件夹（标题/标题.md + assets/）' }}
       </el-checkbox>
       <p v-if="batchMode && !useDocFolder" class="mode-tip">
-        默认按语雀目录<strong>从上到下</strong>逐篇导出，文件直接保存在对应分组目录下（如 <code>分组名/文章标题.md</code>），不会每篇单独建一层文件夹。
+        默认按语雀目录逐篇导出，文件直接保存在对应分组目录下（如 <code>分组名/文章标题.md</code>），不会每篇单独建一层文件夹。
       </p>
+    </div>
+
+    <div v-if="batchMode" class="field export-mode-card">
+      <label class="section-title">导出顺序</label>
+      <el-radio-group v-model="exportOrder">
+        <el-radio value="top-down">从上到下</el-radio>
+        <el-radio value="bottom-up">从下到上</el-radio>
+        <el-radio value="custom">自定义勾选</el-radio>
+      </el-radio-group>
+      <p class="mode-tip">
+        知识库为树状目录。自定义模式下勾选父级会自动选中其下所有子文档。
+      </p>
+      <div v-if="exportOrder === 'custom' && docTree.length" class="select-tree-wrap">
+        <div class="select-tree-actions">
+          <el-button link type="primary" @click="selectTreeRef?.selectAll()">全选</el-button>
+          <el-button link @click="selectTreeRef?.clearAll()">清空</el-button>
+          <span class="muted">已选 {{ selectedSlugs.length }} / {{ docProgressList.length }} 篇</span>
+        </div>
+        <div class="tree-scroll select-tree-scroll">
+          <YuqueExportSelectTree ref="selectTreeRef" v-model="selectedSlugs" :nodes="docTree" />
+        </div>
+      </div>
+      <p v-else-if="exportOrder === 'custom'" class="mode-tip">
+        请先点「预览知识库」加载目录后再勾选要导出的文档。
+      </p>
+    </div>
+
+    <div v-if="batchMode" class="field export-mode-card">
+      <label class="section-title">知识库结构快照（JSON）</label>
+      <p class="mode-tip">
+        导出 JSON 可保存目录树与各文档导出状态。重装 DeskKit 后导入 JSON 可恢复知识库结构与进度（仍需填写 Token 与保存目录）。
+      </p>
+      <div class="snapshot-actions">
+        <el-button @click="handleExportSnapshot">导出 JSON 快照</el-button>
+        <el-button @click="handleImportSnapshot">导入 JSON 快照</el-button>
+      </div>
     </div>
 
     <div class="actions">
@@ -1283,6 +1428,29 @@ h2 {
   background: var(--surface-2);
   border-radius: 8px;
   margin-bottom: 10px;
+}
+
+.select-tree-wrap {
+  margin-top: 10px;
+}
+
+.select-tree-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 8px;
+  font-size: 12px;
+}
+
+.select-tree-scroll {
+  max-height: 320px;
+}
+
+.snapshot-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 8px;
 }
 
 .progress-card {

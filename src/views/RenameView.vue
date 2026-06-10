@@ -1,8 +1,9 @@
 <script setup lang="ts">
 import { computed, reactive, ref } from 'vue';
 import { ElMessage, ElMessageBox } from 'element-plus';
-import { executeRename, openFolder, pickFolder, previewRename, sanitizeNames } from '@/api';
+import { executeRename, openFolder, previewRename, sanitizeNames } from '@/api';
 import ClearCacheButton from '@/components/ClearCacheButton.vue';
+import FavoritePathInput from '@/components/FavoritePathInput.vue';
 import type { RenamePlanItem, RenameRules } from '@/types';
 
 const rootPath = ref('');
@@ -55,11 +56,6 @@ const deleteAtPreview = computed(() => {
   if (keep >= sample.length) return sample;
   return sample.slice(0, keep) + sample.slice(keep + count);
 });
-
-async function pickRoot() {
-  const res = await pickFolder();
-  if (!res.cancelled) rootPath.value = res.path;
-}
 
 async function runPreview() {
   if (!rootPath.value) return ElMessage.warning('请选择文件夹');
@@ -157,11 +153,8 @@ function handleClearRename() {
             <ClearCacheButton module="rename" @cleared="handleClearRename" />
           </div>
           <div class="rename-path-row">
-            <el-input v-model="rootPath" placeholder="文件夹路径" clearable class="rename-path-input" />
+            <FavoritePathInput v-model="rootPath" placeholder="文件夹路径" class="rename-path-input" />
             <div class="rename-path-actions">
-              <el-button title="选择文件夹" @click="pickRoot">
-                <el-icon><Folder /></el-icon>
-              </el-button>
               <el-button v-if="rootPath" title="在 Finder 中打开" @click="openFolder(rootPath)">
                 <el-icon><Position /></el-icon>
               </el-button>

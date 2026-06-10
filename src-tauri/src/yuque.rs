@@ -60,6 +60,42 @@ pub struct YuqueBook {
     pub docs: Vec<YuqueDocPlan>,
 }
 
+pub fn prepare_batch_docs(
+    docs: &[YuqueDocPlan],
+    export_order: &str,
+    selected_slugs: Option<&[String]>,
+) -> Result<Vec<YuqueDocPlan>, String> {
+    let mut list: Vec<YuqueDocPlan> = if export_order == "custom" {
+        let slugs = selected_slugs.ok_or_else(|| "自定义导出请至少勾选一篇文档".to_string())?;
+        if slugs.is_empty() {
+            return Err("自定义导出请至少勾选一篇文档".into());
+        }
+        let set: HashSet<_> = slugs.iter().cloned().collect();
+        docs.iter().filter(|d| set.contains(&d.slug)).cloned().collect()
+    } else {
+        docs.to_vec()
+    };
+
+    if list.is_empty() {
+        return Err("没有可导出的文档".into());
+    }
+
+    if export_order == "bottom-up" {
+        list.reverse();
+    }
+
+    Ok(list)
+}
+
+pub fn import_yuque_progress(save_dir: &str, progress: YuqueProgressState) -> Result<(), String> {
+    if progress.url.trim().is_empty() {
+        return Err("快照缺少语雀链接".into());
+    }
+    let url = progress.url.clone();
+    set_active_progress(save_dir, &url, progress);
+    Ok(())
+}
+
 pub fn normalize_export_format(
     format: Option<YuqueExportFormat>,
     legacy_confluence_html: bool,
@@ -1231,6 +1267,8 @@ async fn run_yuque_batch_export<F, Fut>(
     delay_max_sec: u64,
     use_doc_folder: bool,
     stop_on_error: bool,
+    export_order: &str,
+    selected_slugs: Option<&[String]>,
     export_one: F,
 ) -> Result<serde_json::Value, String>
 where
@@ -1296,6 +1334,8 @@ where
             })
             .collect(),
     );
+    progress.export_order = Some(export_order.to_string());
+    progress.selected_slugs = selected_slugs.map(|s| s.to_vec());
     progress.current_slug = None;
     progress.updated_at = Some(Utc::now().to_rfc3339());
     set_active_progress(&save_dir_str, url, progress.clone());
@@ -1502,6 +1542,8 @@ fn new_progress(
         status: Some("in_progress".into()),
         started_at: Some(Utc::now().to_rfc3339()),
         updated_at: Some(Utc::now().to_rfc3339()),
+        export_order: None,
+        selected_slugs: None,
     }
 }
 
@@ -1519,17 +1561,24 @@ pub async fn export_yuque_batch(params: YuqueBatchParams) -> Result<serde_json::
     let delay_mode = params.delay_mode.clone();
     let use_doc_folder = params.use_doc_folder;
     let stop_on_error = params.stop_on_error;
+    let export_order = params.export_order.clone();
+    let selected_slugs = params.selected_slugs.clone();
 
     if let Some(ref token) = params.token {
         if !token.trim().is_empty() {
             let (parsed, book) = fetch_yuque_book_by_api(token, &params.url).await?;
             let namespace = parsed.path_prefix.clone();
+            let export_docs = prepare_batch_docs(&book.docs, &export_order, selected_slugs.as_deref())?;
+            let export_book = YuqueBook {
+                name: book.name.clone(),
+                docs: export_docs,
+            };
             return run_yuque_batch_export(
                 &params.url,
                 &save_dir,
                 "token",
                 namespace.clone(),
-                &book,
+                &export_book,
                 params.resume,
                 params.progress,
                 &delay_mode,
@@ -1538,6 +1587,8 @@ pub async fn export_yuque_batch(params: YuqueBatchParams) -> Result<serde_json::
                 params.delay_max_sec,
                 use_doc_folder,
                 stop_on_error,
+                &export_order,
+                selected_slugs.as_deref(),
                 |doc, target_dir| {
                     let token = token.clone();
                     let ns = namespace.clone().unwrap_or_default();
@@ -1568,12 +1619,17 @@ pub async fn export_yuque_batch(params: YuqueBatchParams) -> Result<serde_json::
 
     let (parsed, book) = fetch_yuque_book(&params.url).await?;
     let namespace = parsed.path_prefix.clone();
+    let export_docs = prepare_batch_docs(&book.docs, &export_order, selected_slugs.as_deref())?;
+    let export_book = YuqueBook {
+        name: book.name.clone(),
+        docs: export_docs,
+    };
     run_yuque_batch_export(
         &params.url,
         &save_dir,
         "share",
         namespace.clone(),
-        &book,
+        &export_book,
         params.resume,
         params.progress,
         &delay_mode,
@@ -1582,6 +1638,8 @@ pub async fn export_yuque_batch(params: YuqueBatchParams) -> Result<serde_json::
         params.delay_max_sec,
         use_doc_folder,
         stop_on_error,
+        &export_order,
+        selected_slugs.as_deref(),
         move |doc, target_dir| {
             let parsed = parsed.clone();
             let dl = params.download_images;

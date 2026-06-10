@@ -11,6 +11,7 @@ export type ModuleId =
   | 'rename'
   | 'favorites'
   | 'duplicates'
+  | 'findFiles'
   | 'yuque'
   | 'confluence'
   | 'settings';
@@ -20,6 +21,7 @@ export const MODULE_STORAGE_KEYS: Record<ModuleId, string[]> = {
   rename: [],
   favorites: [],
   duplicates: ['dup-last-path'],
+  findFiles: ['find-files-last-path', 'find-files-match-mode', 'find-files-pattern', 'find-files-size-enabled', 'find-files-size-unit', 'find-files-min-size', 'find-files-max-size'],
   yuque: [
     'yuque-last-url',
     'yuque-save-dir',
@@ -60,6 +62,7 @@ export const MODULE_LABELS: Record<ModuleId, string> = {
   rename: '批量重命名',
   favorites: '收藏管理',
   duplicates: '重复文件',
+  findFiles: '查找文件',
   yuque: '语雀导出',
   confluence: 'Confluence 转换',
   settings: '设置',
@@ -80,7 +83,7 @@ export function clearModuleBrowserData(
       lastSession: { folders: [], compareMode: 'md5' },
     });
   } else if (module === 'favorites') {
-    saveAppConfigPartial({ favorites: [] });
+    saveAppConfigPartial({ favorites: [], pathFavorites: [], urlFavorites: [] });
   } else if (module === 'yuque') {
     if (extra?.url && extra?.saveDir) {
       clearYuqueProgressStorage(extra.url, extra.saveDir);

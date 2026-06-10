@@ -14,7 +14,10 @@
     "tauri": "tauri",
     "tauri:dev": "tauri dev",
     "tauri:build": "tauri build",
-    "tauri:build:mac": "tauri build --target aarch64-apple-darwin && tauri build --target x86_64-apple-darwin"
+    "tauri:build:mac": "tauri build --target aarch64-apple-darwin && tauri build --target x86_64-apple-darwin",
+    "version:bump": "node scripts/bump-version.mjs",
+    "release": "bash scripts/release.sh",
+    "release:push": "bash scripts/release.sh patch --push"
   },
   "dependencies": {
     "@element-plus/icons-vue": "^2.3.2",

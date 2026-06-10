@@ -1,6 +1,7 @@
 mod compare_sync;
 mod confluence;
 mod duplicates;
+mod find_files;
 mod fs_util;
 mod models;
 mod rename_ops;
@@ -14,10 +15,12 @@ use compare_sync::{
     sync_folders as run_sync_folders,
 };
 use duplicates::find_duplicates as run_find_duplicates;
+use find_files::find_files as run_find_files;
 use confluence::{batch_convert_markdown, preview_markdown_file};
 use fs_util::resolve_safe_dir;
 use models::*;
-use rename_ops::{build_rename_plan, execute_rename_plan, rename_stats, sanitize_names_plan};
+use rename_ops::{build_rename_plan, build_rename_plan_for_paths, execute_rename_plan, rename_stats, sanitize_names_plan};
+use std::path::PathBuf;
 use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_opener::OpenerExt;
 
@@ -36,6 +39,7 @@ fn get_health() -> HealthResponse {
             "rename".into(),
             "favorites".into(),
             "duplicates".into(),
+            "find-files".into(),
             "yuque".into(),
             "confluence".into(),
             "config".into(),
@@ -175,6 +179,28 @@ fn find_duplicates(
 }
 
 #[tauri::command]
+fn find_files(params: FindFilesParams) -> Result<serde_json::Value, String> {
+    let root = resolve_safe_dir(&params.root_path).map_err(|e| e.to_string())?;
+    let (files, stats) = run_find_files(&root, &params)?;
+    Ok(serde_json::json!({ "files": files, "stats": stats }))
+}
+
+#[tauri::command]
+fn preview_rename_selected(
+    root_path: String,
+    relative_paths: Vec<String>,
+    rules: RenameRules,
+) -> Result<serde_json::Value, String> {
+    if relative_paths.is_empty() {
+        return Err("请先选择要重命名的文件".into());
+    }
+    let root = resolve_safe_dir(&root_path).map_err(|e| e.to_string())?;
+    let plan = build_rename_plan_for_paths(&root, &relative_paths, &rules);
+    let stats = rename_stats(&plan);
+    Ok(serde_json::json!({ "plan": plan, "stats": stats }))
+}
+
+#[tauri::command]
 async fn preview_yuque(url: String, standard_markdown: Option<bool>) -> Result<serde_json::Value, String> {
     yuque::preview_yuque(&url, standard_markdown.unwrap_or(true)).await
 }
@@ -226,6 +252,66 @@ fn reset_yuque_export(url: String, save_dir: String) -> Result<serde_json::Value
 }
 
 #[tauri::command]
+fn import_yuque_progress(save_dir: String, progress: YuqueProgressState) -> Result<serde_json::Value, String> {
+    yuque::import_yuque_progress(&save_dir, progress)?;
+    Ok(serde_json::json!({ "imported": true }))
+}
+
+#[tauri::command]
+async fn pick_save_file(app: tauri::AppHandle, default_name: Option<String>) -> Result<PickFileResponse, String> {
+    let mut builder = app.dialog().file().set_title("保存文件");
+    if let Some(name) = default_name.filter(|n| !n.trim().is_empty()) {
+        builder = builder.set_file_name(name);
+    }
+    match builder.add_filter("JSON", &["json"]).blocking_save_file() {
+        Some(p) => Ok(PickFileResponse {
+            cancelled: false,
+            path: Some(p.to_string()),
+        }),
+        None => Ok(PickFileResponse {
+            cancelled: true,
+            path: None,
+        }),
+    }
+}
+
+#[tauri::command]
+async fn pick_open_file(app: tauri::AppHandle) -> Result<PickFileResponse, String> {
+    match app
+        .dialog()
+        .file()
+        .set_title("选择 JSON 文件")
+        .add_filter("JSON", &["json"])
+        .blocking_pick_file()
+    {
+        Some(p) => Ok(PickFileResponse {
+            cancelled: false,
+            path: Some(p.to_string()),
+        }),
+        None => Ok(PickFileResponse {
+            cancelled: true,
+            path: None,
+        }),
+    }
+}
+
+#[tauri::command]
+fn write_text_file(path: String, content: String) -> Result<serde_json::Value, String> {
+    let p = PathBuf::from(path.trim());
+    if let Some(parent) = p.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    std::fs::write(&p, content).map_err(|e| e.to_string())?;
+    Ok(serde_json::json!({ "path": p.to_string_lossy() }))
+}
+
+#[tauri::command]
+fn read_text_file(path: String) -> Result<serde_json::Value, String> {
+    let content = std::fs::read_to_string(path.trim()).map_err(|e| e.to_string())?;
+    Ok(serde_json::json!({ "content": content }))
+}
+
+#[tauri::command]
 fn confluence_list(source_dir: String, recursive: Option<bool>) -> Result<serde_json::Value, String> {
     confluence::confluence_list(&source_dir, recursive.unwrap_or(true))
 }
@@ -258,6 +344,8 @@ pub fn run() {
             execute_rename,
             sanitize_names,
             find_duplicates,
+            find_files,
+            preview_rename_selected,
             preview_yuque,
             preview_yuque_book,
             export_yuque,
@@ -265,6 +353,11 @@ pub fn run() {
             yuque_export_progress,
             cancel_yuque_export,
             reset_yuque_export,
+            import_yuque_progress,
+            pick_save_file,
+            pick_open_file,
+            write_text_file,
+            read_text_file,
             confluence_list,
             confluence_preview,
             confluence_convert,

@@ -19,6 +19,27 @@ export interface FavoriteItem {
   name: string;
   folders: FolderItem[];
   note?: string;
+  compareMode?: CompareMode;
+  createdAt: string;
+  updatedAt?: string;
+}
+
+/** 收藏的本地文件夹路径 */
+export interface PathFavorite {
+  id: string;
+  name: string;
+  path: string;
+  note?: string;
+  createdAt: string;
+  updatedAt?: string;
+}
+
+/** 收藏的网址 */
+export interface UrlFavorite {
+  id: string;
+  name: string;
+  url: string;
+  note?: string;
   createdAt: string;
   updatedAt?: string;
 }
@@ -31,6 +52,8 @@ export interface AppSettings {
 
 export interface AppConfig {
   favorites: FavoriteItem[];
+  pathFavorites: PathFavorite[];
+  urlFavorites: UrlFavorite[];
   recentPaths: string[];
   settings: AppSettings;
   lastSession: {
@@ -143,4 +166,13 @@ export interface DuplicateGroup {
   size: number;
   count: number;
   files: { relativePath: string; absolutePath: string; size: number }[];
+}
+
+export type FindFilesMatchMode = 'name' | 'suffix' | 'extension' | 'regex';
+
+export interface FindFileEntry {
+  relativePath: string;
+  absolutePath: string;
+  size: number;
+  mtime: number;
 }

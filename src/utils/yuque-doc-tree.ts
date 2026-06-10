@@ -128,3 +128,34 @@ export function formatProgressBar(done: number, total: number, width = 24): stri
   const filled = Math.min(width, Math.max(0, Math.round((done / total) * width)));
   return `[${'|'.repeat(filled)}${'.'.repeat(width - filled)}] ${done}/${total}`;
 }
+
+export interface ElTreeNodeData {
+  id: string;
+  label: string;
+  children?: ElTreeNodeData[];
+}
+
+export function docTreeToElTreeNodes(nodes: DocTreeNode[]): ElTreeNodeData[] {
+  return nodes.map((node) => ({
+    id: node.id,
+    label: node.type === 'folder' ? `📁 ${node.name}` : node.name,
+    children: node.children?.length ? docTreeToElTreeNodes(node.children) : undefined,
+  }));
+}
+
+export function collectDocSlugsFromTree(nodes: DocTreeNode[]): string[] {
+  const slugs: string[] = [];
+  const walk = (list: DocTreeNode[]) => {
+    for (const n of list) {
+      if (n.type === 'doc' && n.doc) slugs.push(n.doc.slug);
+      if (n.children?.length) walk(n.children);
+    }
+  };
+  walk(nodes);
+  return slugs;
+}
+
+export function filterDocsBySlugs(docs: DocProgressItem[], slugs: Set<string> | null): DocProgressItem[] {
+  if (!slugs) return docs;
+  return docs.filter((d) => slugs.has(d.slug));
+}

@@ -1,8 +1,9 @@
 <script setup lang="ts">
 import { onMounted, ref } from 'vue';
 import { ElMessage } from 'element-plus';
-import { deleteFiles, findDuplicates, formatSize, openFolder, pickFolder } from '@/api';
+import { deleteFiles, findDuplicates, formatSize, openFolder } from '@/api';
 import ClearCacheButton from '@/components/ClearCacheButton.vue';
+import FavoritePathInput from '@/components/FavoritePathInput.vue';
 import type { DuplicateGroup } from '@/types';
 
 const rootPath = ref('');
@@ -15,15 +16,6 @@ onMounted(() => {
   const saved = localStorage.getItem('dup-last-path');
   if (saved) rootPath.value = saved;
 });
-
-async function pickRoot() {
-  try {
-    const res = await pickFolder();
-    if (!res.cancelled) rootPath.value = res.path;
-  } catch (err: any) {
-    ElMessage.error({ message: err.message, duration: 8000, showClose: true });
-  }
-}
 
 async function scan() {
   if (!rootPath.value) return ElMessage.warning('请选择文件夹');
@@ -74,8 +66,7 @@ function handleClearDuplicates() {
 <template>
   <div class="page dup-page">
     <div class="dup-toolbar">
-      <el-input v-model="rootPath" placeholder="扫描文件夹" style="flex:1;max-width:480px" />
-      <el-button @click="pickRoot"><el-icon><Folder /></el-icon></el-button>
+      <FavoritePathInput v-model="rootPath" placeholder="扫描文件夹" style="flex:1;max-width:480px" />
       <el-button type="primary" :loading="loading" @click="scan">扫描重复 (MD5)</el-button>
       <el-button v-if="rootPath" @click="openFolder(rootPath)">在 Finder 打开</el-button>
       <el-button type="danger" :disabled="!selected.size" @click="deleteSelected">删除选中 ({{ selected.size }})</el-button>

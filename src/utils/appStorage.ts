@@ -1,4 +1,4 @@
-import type { AppConfig, FavoriteItem } from '@/types';
+import type { AppConfig, FavoriteItem, PathFavorite, UrlFavorite } from '@/types';
 
 const CONFIG_KEY = 'deskit-app-config';
 const YUQUE_PROGRESS_KEY = 'deskit-yuque-progress';
@@ -24,6 +24,8 @@ export const STORAGE_LABEL = '浏览器 localStorage';
 
 export const DEFAULT_APP_CONFIG: AppConfig = {
   favorites: [],
+  pathFavorites: [],
+  urlFavorites: [],
   recentPaths: [],
   settings: {
     compareMode: 'md5',
@@ -52,6 +54,8 @@ export interface YuqueProgressState {
   status?: string;
   startedAt?: string;
   updatedAt?: string;
+  exportOrder?: string;
+  selectedSlugs?: string[];
 }
 
 function readJson<T>(key: string, fallback: T): T {
@@ -76,6 +80,8 @@ export function loadAppConfig(): AppConfig {
     settings: { ...DEFAULT_APP_CONFIG.settings, ...(raw.settings || {}) },
     lastSession: { ...DEFAULT_APP_CONFIG.lastSession, ...(raw.lastSession || {}) },
     favorites: Array.isArray(raw.favorites) ? raw.favorites : [],
+    pathFavorites: Array.isArray(raw.pathFavorites) ? raw.pathFavorites : [],
+    urlFavorites: Array.isArray(raw.urlFavorites) ? raw.urlFavorites : [],
     recentPaths: Array.isArray(raw.recentPaths) ? raw.recentPaths : [],
   };
 }
@@ -88,6 +94,8 @@ export function saveAppConfigPartial(partial: Partial<AppConfig>): AppConfig {
     settings: partial.settings ? { ...current.settings, ...partial.settings } : current.settings,
     lastSession: partial.lastSession ? { ...current.lastSession, ...partial.lastSession } : current.lastSession,
     favorites: partial.favorites != null ? partial.favorites : current.favorites,
+    pathFavorites: partial.pathFavorites != null ? partial.pathFavorites : current.pathFavorites,
+    urlFavorites: partial.urlFavorites != null ? partial.urlFavorites : current.urlFavorites,
     recentPaths: partial.recentPaths != null ? partial.recentPaths : current.recentPaths,
   };
   writeJson(CONFIG_KEY, next);
@@ -120,6 +128,57 @@ export function saveFavoriteAction(
 
   saveAppConfigPartial({ favorites });
   return favorites;
+}
+
+function saveListFavorite<T extends { id: string }>(
+  list: T[],
+  action: 'add' | 'remove' | 'update',
+  item: Partial<T> & { id?: string },
+  create: (id: string) => T,
+): T[] {
+  if (action === 'add' && item) {
+    const id = item.id || `fav-${Date.now()}`;
+    return [{ ...create(id), ...item, id } as T, ...list.filter((f) => f.id !== id)];
+  }
+  if (action === 'remove' && item?.id) {
+    return list.filter((f) => f.id !== item.id);
+  }
+  if (action === 'update' && item?.id) {
+    return list.map((f) => (f.id === item.id ? { ...f, ...item } as T : f));
+  }
+  return list;
+}
+
+export function savePathFavoriteAction(
+  action: 'add' | 'remove' | 'update',
+  item: Partial<PathFavorite> & { id?: string },
+): PathFavorite[] {
+  const config = loadAppConfig();
+  const now = new Date().toISOString();
+  const pathFavorites = saveListFavorite(
+    config.pathFavorites,
+    action,
+    item,
+    (id) => ({ id, name: '', path: '', createdAt: now }),
+  );
+  saveAppConfigPartial({ pathFavorites });
+  return pathFavorites;
+}
+
+export function saveUrlFavoriteAction(
+  action: 'add' | 'remove' | 'update',
+  item: Partial<UrlFavorite> & { id?: string },
+): UrlFavorite[] {
+  const config = loadAppConfig();
+  const now = new Date().toISOString();
+  const urlFavorites = saveListFavorite(
+    config.urlFavorites,
+    action,
+    item,
+    (id) => ({ id, name: '', url: '', createdAt: now }),
+  );
+  saveAppConfigPartial({ urlFavorites });
+  return urlFavorites;
 }
 
 export function normalizeYuqueUrlKey(input: string): string {
