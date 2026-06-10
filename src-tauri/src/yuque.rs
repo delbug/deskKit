@@ -883,11 +883,53 @@ fn progress_store_key(save_dir: &str, url: &str) -> String {
     )
 }
 
+fn progress_file_path(save_dir: &Path, url: &str) -> PathBuf {
+    let key = normalize_url_key(url);
+    let safe: String = key
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    save_dir.join(format!(".deskit-yuque-{safe}.json"))
+}
+
+fn save_progress_file(save_dir: &Path, url: &str, state: &YuqueProgressState) {
+    if let Ok(json) = serde_json::to_string_pretty(state) {
+        let path = progress_file_path(save_dir, url);
+        let _ = fs::write(path, json);
+    }
+}
+
+fn load_progress_file(save_dir: &Path, url: &str) -> Option<YuqueProgressState> {
+    let path = progress_file_path(save_dir, url);
+    let raw = fs::read_to_string(path).ok()?;
+    let state: YuqueProgressState = serde_json::from_str(&raw).ok()?;
+    if normalize_url_key(&state.url) != normalize_url_key(url) {
+        return None;
+    }
+    Some(state)
+}
+
+fn pick_latest_progress(candidates: Vec<YuqueProgressState>) -> Option<YuqueProgressState> {
+    candidates.into_iter().max_by(|a, b| {
+        a.updated_at
+            .as_deref()
+            .unwrap_or("")
+            .cmp(b.updated_at.as_deref().unwrap_or(""))
+    })
+}
+
 fn set_active_progress(save_dir: &str, url: &str, state: YuqueProgressState) {
     let key = progress_store_key(save_dir, url);
     if let Ok(mut map) = ACTIVE_PROGRESS.lock() {
-        map.insert(key, state);
+        map.insert(key, state.clone());
     }
+    save_progress_file(Path::new(save_dir), url, &state);
 }
 
 fn get_active_progress(save_dir: &str, url: &str) -> Option<YuqueProgressState> {
@@ -895,7 +937,23 @@ fn get_active_progress(save_dir: &str, url: &str) -> Option<YuqueProgressState> 
     ACTIVE_PROGRESS.lock().ok()?.get(&key).cloned()
 }
 
-fn doc_output_exists(book_dir: &Path, doc: &YuqueDocPlan) -> bool {
+fn doc_output_file_exists(target_dir: &Path, base_name: &str) -> bool {
+    for i in 0..=20 {
+        let stem = if i == 0 {
+            base_name.to_string()
+        } else {
+            format!("{base_name}_{i}")
+        };
+        for ext in ["md", "html"] {
+            if target_dir.join(format!("{stem}.{ext}")).exists() {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn doc_output_exists(book_dir: &Path, doc: &YuqueDocPlan, use_doc_folder: bool) -> bool {
     let target_dir = if doc.dir_segments.is_empty() {
         book_dir.to_path_buf()
     } else {
@@ -905,28 +963,22 @@ fn doc_output_exists(book_dir: &Path, doc: &YuqueDocPlan) -> bool {
         return false;
     }
     let base_name = safe_file_name(&doc.title);
-    for i in 0..=20 {
-        let folder_name = if i == 0 {
-            base_name.clone()
-        } else {
-            format!("{base_name}_{i}")
-        };
-        let folder = target_dir.join(&folder_name);
-        if folder.is_dir() {
-            if let Ok(entries) = fs::read_dir(&folder) {
-                if entries.filter_map(|e| e.ok()).any(|e| {
-                    e.path()
-                        .extension()
-                        .and_then(|x| x.to_str())
-                        .map(|x| x == "md" || x == "html")
-                        .unwrap_or(false)
-                }) {
-                    return true;
-                }
+    if use_doc_folder {
+        for i in 0..=20 {
+            let folder_name = if i == 0 {
+                base_name.clone()
+            } else {
+                format!("{base_name}_{i}")
+            };
+            let folder = target_dir.join(&folder_name);
+            if folder.is_dir() && doc_output_file_exists(&folder, &base_name) {
+                return true;
             }
         }
+        false
+    } else {
+        doc_output_file_exists(&target_dir, &base_name)
     }
-    false
 }
 
 pub fn get_export_progress_summary(
@@ -935,27 +987,27 @@ pub fn get_export_progress_summary(
     auth_mode: Option<&str>,
     client_progress: Option<YuqueProgressState>,
 ) -> serde_json::Value {
-    let active = get_active_progress(save_dir, url);
-    let progress = if let Some(ref a) = active {
+    let mut candidates = Vec::new();
+    if let Some(a) = get_active_progress(save_dir, url) {
+        candidates.push(a);
+    }
+    if let Some(cp) = client_progress {
+        if normalize_url_key(&cp.url) == normalize_url_key(url) {
+            candidates.push(cp);
+        }
+    }
+    if let Some(fp) = load_progress_file(Path::new(save_dir), url) {
+        candidates.push(fp);
+    }
+
+    let progress = pick_latest_progress(candidates).and_then(|p| {
         if let Some(mode) = auth_mode {
-            if a.auth_mode.as_deref().is_some_and(|m| m != mode) {
-                return serde_json::json!({ "found": false });
+            if p.auth_mode.as_deref().is_some_and(|m| m != mode) {
+                return None;
             }
         }
-        Some(a.clone())
-    } else if let Some(cp) = client_progress {
-        if let Some(mode) = auth_mode {
-            if cp.auth_mode.as_deref().is_some_and(|m| m != mode) {
-                return serde_json::json!({ "found": false });
-            }
-        }
-        if normalize_url_key(&cp.url) != normalize_url_key(url) {
-            return serde_json::json!({ "found": false });
-        }
-        Some(cp)
-    } else {
-        None
-    };
+        Some(p)
+    });
 
     match progress {
         None => serde_json::json!({ "found": false }),
@@ -1030,8 +1082,16 @@ fn resolve_delay_ms(mode: &str, fixed_sec: u64, min_sec: u64, max_sec: u64) -> u
     }
 }
 
-fn has_pending_docs(docs: &[YuqueDocPlan], from: usize, completed: &std::collections::HashSet<String>, book_dir: &Path) -> bool {
-    docs.iter().skip(from).any(|d| !completed.contains(&d.slug) && !doc_output_exists(book_dir, d))
+fn has_pending_docs(
+    docs: &[YuqueDocPlan],
+    from: usize,
+    completed: &std::collections::HashSet<String>,
+    book_dir: &Path,
+    use_doc_folder: bool,
+) -> bool {
+    docs.iter()
+        .skip(from)
+        .any(|d| !completed.contains(&d.slug) && !doc_output_exists(book_dir, d, use_doc_folder))
 }
 
 async fn run_yuque_batch_export<F, Fut>(
@@ -1046,6 +1106,8 @@ async fn run_yuque_batch_export<F, Fut>(
     delay_fixed_sec: u64,
     delay_min_sec: u64,
     delay_max_sec: u64,
+    use_doc_folder: bool,
+    stop_on_error: bool,
     export_one: F,
 ) -> Result<serde_json::Value, String>
 where
@@ -1056,14 +1118,22 @@ where
 
     let save_dir_str = save_dir.to_string_lossy();
     let resumed = if resume {
-        get_active_progress(&save_dir_str, url).or_else(|| {
-            existing_progress.and_then(|p| {
-                p.book_dir
-                    .as_ref()
-                    .map(|d| PathBuf::from(d))
-                    .filter(|d| d.exists())
-                    .map(|_| p)
-            })
+        let mut candidates = Vec::new();
+        if let Some(p) = get_active_progress(&save_dir_str, url) {
+            candidates.push(p);
+        }
+        if let Some(p) = existing_progress {
+            candidates.push(p);
+        }
+        if let Some(p) = load_progress_file(save_dir, url) {
+            candidates.push(p);
+        }
+        pick_latest_progress(candidates).and_then(|p| {
+            p.book_dir
+                .as_ref()
+                .map(|d| PathBuf::from(d))
+                .filter(|d| d.exists())
+                .map(|_| p)
         })
     } else {
         None
@@ -1113,7 +1183,7 @@ where
         if completed_set.contains(&doc.slug) {
             continue;
         }
-        if doc_output_exists(&book_dir, doc) {
+        if doc_output_exists(&book_dir, doc, use_doc_folder) {
             completed_set.insert(doc.slug.clone());
         }
     }
@@ -1123,6 +1193,7 @@ where
     let mut failed = Vec::new();
     let mut skipped_count = 0usize;
     let mut newly_exported = 0usize;
+    let mut stopped_early = false;
 
     for (i, doc) in book.docs.iter().enumerate() {
         if completed_set.contains(&doc.slug) {
@@ -1183,11 +1254,18 @@ where
                     "dirPath": dir_path,
                     "message": fail.message,
                 }));
+                if stop_on_error {
+                    progress.status = Some("stopped_on_error".into());
+                    progress.updated_at = Some(Utc::now().to_rfc3339());
+                    set_active_progress(&save_dir_str, url, progress.clone());
+                    stopped_early = true;
+                    break;
+                }
             }
         }
 
         if i + 1 < book.docs.len()
-            && has_pending_docs(&book.docs, i + 1, &completed_set, &book_dir)
+            && has_pending_docs(&book.docs, i + 1, &completed_set, &book_dir, use_doc_folder)
         {
             let wait = resolve_delay_ms(delay_mode, delay_fixed_sec, delay_min_sec, delay_max_sec);
             if wait > 0 {
@@ -1238,6 +1316,7 @@ where
         "remainingCount": book.docs.len().saturating_sub(exported_total),
         "failedCount": progress.failed.as_ref().map(|f| f.len()).unwrap_or(0),
         "resume": resumed.is_some(),
+        "stoppedEarly": stopped_early,
         "delayMode": delay_mode,
         "success": success,
         "failed": failed,
@@ -1284,6 +1363,8 @@ pub async fn export_yuque_batch(params: YuqueBatchParams) -> Result<serde_json::
 
     let format = normalize_export_format(params.export_format, params.export_confluence_html);
     let delay_mode = params.delay_mode.clone();
+    let use_doc_folder = params.use_doc_folder;
+    let stop_on_error = params.stop_on_error;
 
     if let Some(ref token) = params.token {
         if !token.trim().is_empty() {
@@ -1301,12 +1382,15 @@ pub async fn export_yuque_batch(params: YuqueBatchParams) -> Result<serde_json::
                 params.delay_fixed_sec,
                 params.delay_min_sec,
                 params.delay_max_sec,
+                use_doc_folder,
+                stop_on_error,
                 |doc, target_dir| {
                     let token = token.clone();
                     let ns = namespace.clone().unwrap_or_default();
                     let dl = params.download_images;
                     let std = params.standard_markdown;
                     let fmt = format;
+                    let use_doc_folder = use_doc_folder;
                     async move {
                         let raw = fetch_doc_markdown_by_api(&token, &ns, &doc.slug).await?;
                         let images = images_from_markdown(&raw);
@@ -1317,7 +1401,7 @@ pub async fn export_yuque_batch(params: YuqueBatchParams) -> Result<serde_json::
                             &target_dir,
                             dl,
                             std,
-                            true,
+                            use_doc_folder,
                             fmt,
                         )
                         .await
@@ -1342,11 +1426,14 @@ pub async fn export_yuque_batch(params: YuqueBatchParams) -> Result<serde_json::
         params.delay_fixed_sec,
         params.delay_min_sec,
         params.delay_max_sec,
+        use_doc_folder,
+        stop_on_error,
         move |doc, target_dir| {
             let parsed = parsed.clone();
             let dl = params.download_images;
             let std = params.standard_markdown;
             let fmt = format;
+            let use_doc_folder = use_doc_folder;
             async move {
                 let (page_url, markdown_url) = build_doc_urls(&parsed, &doc.slug);
                 let markdown = fetch_yuque_markdown(&markdown_url).await?;
@@ -1357,7 +1444,7 @@ pub async fn export_yuque_batch(params: YuqueBatchParams) -> Result<serde_json::
                     doc.title.clone()
                 };
                 let images = images_from_markdown(&markdown);
-                save_yuque_doc_content(&title, &markdown, &images, &target_dir, dl, std, true, fmt).await
+                save_yuque_doc_content(&title, &markdown, &images, &target_dir, dl, std, use_doc_folder, fmt).await
             }
         },
     )

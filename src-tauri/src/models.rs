@@ -322,6 +322,10 @@ pub struct YuqueBatchParams {
     #[serde(default = "default_true")]
     pub standard_markdown: bool,
     #[serde(default)]
+    pub use_doc_folder: bool,
+    #[serde(default = "default_true")]
+    pub stop_on_error: bool,
+    #[serde(default)]
     pub export_format: Option<YuqueExportFormat>,
     #[serde(default)]
     pub export_confluence_html: bool,

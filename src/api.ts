@@ -240,6 +240,8 @@ export async function exportYuqueBatch(params: {
   delayFixedSec?: number;
   delayMinSec?: number;
   delayMaxSec?: number;
+  useDocFolder?: boolean;
+  stopOnError?: boolean;
 }) {
   const storedProgress = params.resume !== false ? loadYuqueProgress(params.url, params.saveDir) : null;
   const result = await invokeOk<{
@@ -252,6 +254,7 @@ export async function exportYuqueBatch(params: {
     remainingCount: number;
     failedCount: number;
     resume: boolean;
+    stoppedEarly?: boolean;
     delayMode: string;
     success: { title: string; filePath: string; folderPath: string | null; relativePath?: string }[];
     failed: { title: string; slug: string; dirPath?: string; message: string }[];

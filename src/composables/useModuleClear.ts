@@ -34,6 +34,7 @@ export const MODULE_STORAGE_KEYS: Record<ModuleId, string[]> = {
     'yuque-delay-min',
     'yuque-delay-max',
     'yuque-resume-export',
+    'yuque-stop-on-error',
     'yuque-export-md',
     'yuque-export-html',
     'yuque-export-format',

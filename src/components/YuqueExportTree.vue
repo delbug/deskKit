@@ -29,6 +29,8 @@ function statusIcon(status?: string) {
         <span class="doc-title">{{ node.name }}</span>
         <span v-if="node.doc?.status === 'exporting'" class="tag exporting">下载中</span>
         <span v-else-if="node.doc?.status === 'failed'" class="tag failed" :title="node.doc.failMessage">失败</span>
+        <span v-else-if="node.doc?.status === 'pending'" class="tag pending">待导出</span>
+        <span v-else-if="node.doc?.status === 'done'" class="tag done">已导出</span>
       </div>
       <YuqueExportTree
         v-if="node.children?.length"
@@ -144,6 +146,16 @@ function statusIcon(status?: string) {
   &.failed {
     background: rgba(239, 68, 68, 0.15);
     color: #f87171;
+  }
+
+  &.pending {
+    background: rgba(148, 163, 184, 0.12);
+    color: var(--text-muted);
+  }
+
+  &.done {
+    background: rgba(34, 197, 94, 0.12);
+    color: #4ade80;
   }
 }
 </style>

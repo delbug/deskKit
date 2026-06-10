@@ -32,6 +32,7 @@ const authMode = ref<'share' | 'token'>('token');
 const yuqueToken = ref('');
 const batchMode = computed(() => exportMode.value === 'batch');
 const useDocFolder = ref(false);
+const stopOnError = ref(true);
 const delayMode = ref<'none' | 'fixed' | 'random'>('random');
 const delayFixedSec = ref(5);
 const delayMinSec = ref(3);
@@ -95,6 +96,10 @@ const progressStats = computed(() => {
 const progressBarText = computed(() => formatProgressBar(progressStats.value.done, progressStats.value.total));
 
 const showProgressPanel = computed(() => batchMode.value && docProgressList.value.length > 0);
+
+const showCatalogHint = computed(
+  () => batchMode.value && bookCatalog.value.length > 0 && !exportProgress.value && !exportingActive.value,
+);
 
 const progressBookName = computed(
   () => bookPreview.value?.bookName || progressDetail.value?.bookName || '知识库',
@@ -161,6 +166,10 @@ function loadYuqueSettings() {
   if (savedResume === '0') resumeExport.value = false;
   else if (savedResume === '1') resumeExport.value = true;
 
+  const savedStopOnError = localStorage.getItem('yuque-stop-on-error');
+  if (savedStopOnError === '0') stopOnError.value = false;
+  else if (savedStopOnError === '1') stopOnError.value = true;
+
   const savedExportMd = localStorage.getItem('yuque-export-md');
   const savedExportHtml = localStorage.getItem('yuque-export-html');
   if (savedExportMd === '1' || savedExportMd === '0') {
@@ -207,13 +216,17 @@ function persistYuqueSettings() {
   localStorage.setItem('yuque-delay-min', String(delayMinSec.value));
   localStorage.setItem('yuque-delay-max', String(delayMaxSec.value));
   localStorage.setItem('yuque-resume-export', resumeExport.value ? '1' : '0');
+  localStorage.setItem('yuque-stop-on-error', stopOnError.value ? '1' : '0');
   localStorage.setItem('yuque-export-md', exportMd.value ? '1' : '0');
   localStorage.setItem('yuque-export-html', exportHtml.value ? '1' : '0');
 }
 
-onMounted(() => {
+onMounted(async () => {
   loadYuqueSettings();
-  refreshProgressDetail();
+  await refreshProgressDetail();
+  if (batchMode.value && shareUrl.value.trim() && saveDir.value.trim() && !bookCatalog.value.length) {
+    await loadBookCatalog(true);
+  }
 });
 
 onUnmounted(() => {
@@ -250,7 +263,7 @@ async function refreshProgressDetail() {
     const data = await fetchYuqueExportProgress(url, dir, token || undefined);
     if (data.found) {
       progressDetail.value = data;
-      if (data.docs?.length && !bookCatalog.value.length) {
+      if (data.docs?.length) {
         bookCatalog.value = data.docs.map((d) => ({
           slug: d.slug,
           title: d.title,
@@ -342,6 +355,7 @@ watch(
     delayMinSec,
     delayMaxSec,
     resumeExport,
+    stopOnError,
   ],
   () => persistYuqueSettings(),
 );
@@ -391,6 +405,7 @@ function handleClearYuque() {
   delayMinSec.value = 3;
   delayMaxSec.value = 30;
   resumeExport.value = true;
+  stopOnError.value = true;
   preview.value = null;
   bookPreview.value = null;
   bookCatalog.value = [];
@@ -493,6 +508,8 @@ async function handleExport() {
         delayFixedSec: delayFixedSec.value,
         delayMinSec: delayMinSec.value,
         delayMaxSec: delayMaxSec.value,
+        useDocFolder: useDocFolder.value,
+        stopOnError: stopOnError.value,
       });
       persistDelaySettings();
       persistAuthSettings();
@@ -508,7 +525,13 @@ async function handleExport() {
       };
       lastResult.value = { filePath: result.bookDir, fileName: result.bookName, bookDir: result.bookDir };
       await refreshProgressDetail();
-      if (result.remainingCount > 0) {
+      if (result.stoppedEarly) {
+        ElMessage.warning({
+          message: `导出因错误已暂停（已完成 ${result.exported}/${result.total}）。进度已保存，几小时后用相同链接和目录点「继续导出」即可从失败处重试。`,
+          duration: 12000,
+          showClose: true,
+        });
+      } else if (result.remainingCount > 0) {
         ElMessage.warning(
           `本次新导出 ${result.newlyExported} 篇，跳过 ${result.skippedCount} 篇；` +
           `累计 ${result.exported}/${result.total}，还剩 ${result.remainingCount} 篇`,
@@ -659,20 +682,22 @@ async function handleExport() {
     <div v-if="batchMode" class="field export-mode-card">
       <label class="section-title">断点续导</label>
       <el-checkbox v-model="resumeExport">继续上次导出（跳过已完成的文档）</el-checkbox>
+      <el-checkbox v-model="stopOnError">遇错暂停（限流或单篇失败时停止，保存进度供稍后重试）</el-checkbox>
       <div v-if="exportProgress && resumeExport" class="progress-card">
         <p>
           <strong>「{{ exportProgress.bookName }}」</strong>
           已完成 {{ exportProgress.completed }}/{{ exportProgress.total }} 篇
           <span v-if="exportProgress.remaining">，还剩 {{ exportProgress.remaining }} 篇</span>
         </p>
-        <p v-if="exportProgress.failedCount" class="warn">上次有 {{ exportProgress.failedCount }} 篇失败，继续导出时会重试</p>
+        <p v-if="exportProgress.failedCount" class="warn">上次有 {{ exportProgress.failedCount }} 篇失败，继续导出时会从第一篇失败处重试</p>
         <p v-if="exportProgress.updatedAt" class="muted">进度记录于 {{ new Date(exportProgress.updatedAt).toLocaleString() }}</p>
         <el-button v-if="exportProgress.bookDir" link type="primary" @click="openFolder(exportProgress.bookDir)">
           打开已导出目录
         </el-button>
       </div>
       <p v-else class="mode-tip">
-        导出进度保存在浏览器 localStorage 中，每完成一篇自动更新。明天用相同链接和保存目录即可接着导出。
+        每完成一篇自动记录进度（应用内 + 保存目录下的 <code>.deskit-yuque-*.json</code>）。
+        用<strong>相同知识库链接和保存目录</strong>再次打开，目录树会显示 ✓ 已导出 / ✗ 失败 / ○ 待导出。
       </p>
     </div>
 
@@ -708,8 +733,13 @@ async function handleExport() {
       </p>
     </div>
 
-    <div v-if="!batchMode" class="field">
-      <el-checkbox v-model="useDocFolder">单篇也使用独立文件夹（标题/标题.md + assets/）</el-checkbox>
+    <div class="field">
+      <el-checkbox v-model="useDocFolder">
+        {{ batchMode ? '每篇使用独立子文件夹（标题/标题.md + assets/）' : '单篇也使用独立文件夹（标题/标题.md + assets/）' }}
+      </el-checkbox>
+      <p v-if="batchMode && !useDocFolder" class="mode-tip">
+        默认按语雀目录<strong>从上到下</strong>逐篇导出，文件直接保存在对应分组目录下（如 <code>分组名/文章标题.md</code>），不会每篇单独建一层文件夹。
+      </p>
     </div>
 
     <div class="actions">
@@ -721,9 +751,13 @@ async function handleExport() {
 
     <div v-if="showProgressPanel" class="progress-panel">
       <div class="progress-panel-head">
-        <strong>导出进度：{{ progressBookName }}</strong>
+        <strong>{{ exportingActive ? '导出进度' : '知识库目录' }}：{{ progressBookName }}</strong>
+        <span v-if="bookPreview?.total" class="catalog-total">共 {{ bookPreview.total }} 篇</span>
         <span v-if="exportingActive" class="live-tag">实时更新中</span>
       </div>
+      <p v-if="showCatalogHint" class="catalog-hint">
+        下方为知识库全部文档。✓ 已导出 · ✗ 失败 · ○ 待导出。点「批量导出知识库」后状态会实时更新。
+      </p>
       <div class="progress-bar-line">{{ progressBarText }}</div>
       <div class="progress-stats-row">
         <span class="stat done">✓ {{ progressStats.done }} 已完成</span>
@@ -1018,6 +1052,18 @@ h2 {
     color: #60a5fa;
     animation: pulse 1.5s ease-in-out infinite;
   }
+
+  .catalog-total {
+    font-size: 12px;
+    color: var(--text-muted);
+    font-weight: 400;
+  }
+}
+
+.catalog-hint {
+  font-size: 12px;
+  color: var(--text-muted);
+  margin: -4px 0 10px;
 }
 
 @keyframes pulse {
