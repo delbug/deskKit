@@ -11,7 +11,7 @@ use regex::Regex;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -20,6 +20,8 @@ use url::Url;
 
 static ACTIVE_PROGRESS: Lazy<Mutex<HashMap<String, YuqueProgressState>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
+
+static EXPORT_CANCEL: Lazy<Mutex<HashSet<String>>> = Lazy::new(|| Mutex::new(HashSet::new()));
 
 const UA: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
 const API_UA: &str = "deskit-yuque-exporter";
@@ -924,6 +926,127 @@ fn pick_latest_progress(candidates: Vec<YuqueProgressState>) -> Option<YuqueProg
     })
 }
 
+fn request_export_cancel(save_dir: &str, url: &str) {
+    let key = progress_store_key(save_dir, url);
+    if let Ok(mut set) = EXPORT_CANCEL.lock() {
+        set.insert(key);
+    }
+}
+
+fn clear_export_cancel(save_dir: &str, url: &str) {
+    let key = progress_store_key(save_dir, url);
+    if let Ok(mut set) = EXPORT_CANCEL.lock() {
+        set.remove(&key);
+    }
+}
+
+fn is_export_cancel_requested(save_dir: &str, url: &str) -> bool {
+    let key = progress_store_key(save_dir, url);
+    EXPORT_CANCEL
+        .lock()
+        .ok()
+        .map(|set| set.contains(&key))
+        .unwrap_or(false)
+}
+
+pub fn cancel_yuque_export(save_dir: &str, url: &str) {
+    request_export_cancel(save_dir, url);
+}
+
+pub fn reset_yuque_export(save_dir: &str, url: &str) {
+    let key = progress_store_key(save_dir, url);
+    if let Ok(mut map) = ACTIVE_PROGRESS.lock() {
+        map.remove(&key);
+    }
+    clear_export_cancel(save_dir, url);
+    let path = progress_file_path(Path::new(save_dir), url);
+    let _ = fs::remove_file(path);
+}
+
+async fn sleep_interruptible(save_dir: &str, url: &str, ms: u64) -> bool {
+    if ms == 0 {
+        return is_export_cancel_requested(save_dir, url);
+    }
+    let mut remaining = ms;
+    while remaining > 0 {
+        if is_export_cancel_requested(save_dir, url) {
+            return true;
+        }
+        let chunk = remaining.min(400);
+        tokio::time::sleep(Duration::from_millis(chunk)).await;
+        remaining = remaining.saturating_sub(chunk);
+    }
+    is_export_cancel_requested(save_dir, url)
+}
+
+fn batch_export_result(
+    book: &YuqueBook,
+    book_dir: &Path,
+    progress: YuqueProgressState,
+    resumed: bool,
+    delay_mode: &str,
+    exported_total: usize,
+    newly_exported: usize,
+    skipped_count: usize,
+    stopped_early: bool,
+    paused: bool,
+    success: Vec<serde_json::Value>,
+    failed: Vec<serde_json::Value>,
+) -> serde_json::Value {
+    serde_json::json!({
+        "bookName": book.name,
+        "bookDir": book_dir.to_string_lossy(),
+        "total": book.docs.len(),
+        "exported": exported_total,
+        "newlyExported": newly_exported,
+        "skippedCount": skipped_count,
+        "remainingCount": book.docs.len().saturating_sub(exported_total),
+        "failedCount": progress.failed.as_ref().map(|f| f.len()).unwrap_or(0),
+        "resume": resumed,
+        "stoppedEarly": stopped_early,
+        "paused": paused,
+        "delayMode": delay_mode,
+        "success": success,
+        "failed": failed,
+        "progress": progress,
+    })
+}
+
+fn finish_paused_export(
+    save_dir_str: &str,
+    url: &str,
+    book: &YuqueBook,
+    book_dir: &Path,
+    mut progress: YuqueProgressState,
+    resumed: bool,
+    delay_mode: &str,
+    completed_set: &std::collections::HashSet<String>,
+    newly_exported: usize,
+    skipped_count: usize,
+    success: Vec<serde_json::Value>,
+    failed: Vec<serde_json::Value>,
+) -> Result<serde_json::Value, String> {
+    progress.status = Some("paused".into());
+    progress.current_slug = None;
+    progress.updated_at = Some(Utc::now().to_rfc3339());
+    set_active_progress(save_dir_str, url, progress.clone());
+    clear_export_cancel(save_dir_str, url);
+    Ok(batch_export_result(
+        book,
+        book_dir,
+        progress,
+        resumed,
+        delay_mode,
+        completed_set.len(),
+        newly_exported,
+        skipped_count,
+        false,
+        true,
+        success,
+        failed,
+    ))
+}
+
 fn set_active_progress(save_dir: &str, url: &str, state: YuqueProgressState) {
     let key = progress_store_key(save_dir, url);
     if let Ok(mut map) = ACTIVE_PROGRESS.lock() {
@@ -1195,10 +1318,29 @@ where
     let mut newly_exported = 0usize;
     let mut stopped_early = false;
 
+    clear_export_cancel(&save_dir_str, url);
+
     for (i, doc) in book.docs.iter().enumerate() {
         if completed_set.contains(&doc.slug) {
             skipped_count += 1;
             continue;
+        }
+
+        if is_export_cancel_requested(&save_dir_str, url) {
+            return finish_paused_export(
+                &save_dir_str,
+                url,
+                book,
+                &book_dir,
+                progress,
+                resumed.is_some(),
+                delay_mode,
+                &completed_set,
+                newly_exported,
+                skipped_count,
+                success,
+                failed,
+            );
         }
 
         let target_dir = if doc.dir_segments.is_empty() {
@@ -1268,8 +1410,21 @@ where
             && has_pending_docs(&book.docs, i + 1, &completed_set, &book_dir, use_doc_folder)
         {
             let wait = resolve_delay_ms(delay_mode, delay_fixed_sec, delay_min_sec, delay_max_sec);
-            if wait > 0 {
-                tokio::time::sleep(Duration::from_millis(wait)).await;
+            if sleep_interruptible(&save_dir_str, url, wait).await {
+                return finish_paused_export(
+                    &save_dir_str,
+                    url,
+                    book,
+                    &book_dir,
+                    progress,
+                    resumed.is_some(),
+                    delay_mode,
+                    &completed_set,
+                    newly_exported,
+                    skipped_count,
+                    success,
+                    failed,
+                );
             }
         }
     }
@@ -1306,22 +1461,21 @@ where
         })
         .collect();
 
-    Ok(serde_json::json!({
-        "bookName": book.name,
-        "bookDir": book_dir.to_string_lossy(),
-        "total": book.docs.len(),
-        "exported": exported_total,
-        "newlyExported": newly_exported,
-        "skippedCount": skipped_count,
-        "remainingCount": book.docs.len().saturating_sub(exported_total),
-        "failedCount": progress.failed.as_ref().map(|f| f.len()).unwrap_or(0),
-        "resume": resumed.is_some(),
-        "stoppedEarly": stopped_early,
-        "delayMode": delay_mode,
-        "success": success,
-        "failed": failed,
-        "progress": progress,
-    }))
+    clear_export_cancel(&save_dir_str, url);
+    Ok(batch_export_result(
+        book,
+        &book_dir,
+        progress,
+        resumed.is_some(),
+        delay_mode,
+        exported_total,
+        newly_exported,
+        skipped_count,
+        stopped_early,
+        false,
+        success,
+        failed,
+    ))
 }
 
 fn new_progress(

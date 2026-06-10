@@ -12,6 +12,7 @@ import {
   previewConfluenceFile,
   type ConfluenceOutputFormat,
 } from '@/api';
+import { YUQUE_DISCLAIMER_SHORT } from '@/constants/yuque-disclaimer';
 
 type MdFileItem = { absolutePath: string; relativePath: string; fileName: string };
 
@@ -437,6 +438,15 @@ function handleClear() {
         <ClearCacheButton module="confluence" @cleared="handleClear" />
       </div>
     </div>
+
+    <el-alert
+      type="warning"
+      :closable="false"
+      show-icon
+      class="disclaimer-alert"
+      title="使用须知"
+      :description="YUQUE_DISCLAIMER_SHORT"
+    />
 
     <el-alert
       v-if="!serverReady"

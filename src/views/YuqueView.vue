@@ -1,11 +1,13 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
-import { ElMessage } from 'element-plus';
+import { ElMessage, ElMessageBox } from 'element-plus';
 import YuqueExportTree from '@/components/YuqueExportTree.vue';
 import ClearCacheButton from '@/components/ClearCacheButton.vue';
 import {
   exportYuque,
   exportYuqueBatch,
+  cancelYuqueExport,
+  resetYuqueExport,
   fetchYuqueExportProgress,
   openFolder,
   pickFolder,
@@ -19,6 +21,11 @@ import {
   mergeDocProgress,
   type ExportProgressDetail,
 } from '@/utils/yuque-doc-tree';
+import {
+  YUQUE_DISCLAIMER_CONFIRM,
+  YUQUE_DISCLAIMER_LINES,
+  YUQUE_DISCLAIMER_TITLE,
+} from '@/constants/yuque-disclaimer';
 
 const shareUrl = ref('');
 const saveDir = ref('');
@@ -43,6 +50,8 @@ const bookPreview = ref<{ bookName: string; total: number; docs: { title: string
 const bookCatalog = ref<{ slug: string; title: string; dirPath: string }[]>([]);
 const progressDetail = ref<ExportProgressDetail | null>(null);
 const exportingActive = ref(false);
+const batchExportRunning = ref(false);
+const pauseRequested = ref(false);
 let progressPollTimer: ReturnType<typeof setInterval> | null = null;
 const lastResult = ref<{ filePath: string; fileName: string; bookDir?: string } | null>(null);
 const batchResult = ref<{
@@ -99,6 +108,14 @@ const showProgressPanel = computed(() => batchMode.value && docProgressList.valu
 
 const showCatalogHint = computed(
   () => batchMode.value && bookCatalog.value.length > 0 && !exportProgress.value && !exportingActive.value,
+);
+
+const hasExportProgress = computed(
+  () => !!(exportProgress.value || progressDetail.value?.found),
+);
+
+const exportPaused = computed(
+  () => progressDetail.value?.status === 'paused' || pauseRequested.value,
 );
 
 const progressBookName = computed(
@@ -388,6 +405,7 @@ function clearShareUrl() {
   lastResult.value = null;
   batchResult.value = null;
   exportProgress.value = null;
+  pauseRequested.value = false;
 }
 
 function handleClearYuque() {
@@ -414,7 +432,52 @@ function handleClearYuque() {
   lastResult.value = null;
   batchResult.value = null;
   exportProgress.value = null;
+  pauseRequested.value = false;
   stopProgressPolling();
+}
+
+async function handlePauseExport() {
+  const url = shareUrl.value.trim();
+  const dir = saveDir.value.trim();
+  if (!url || !dir) return;
+  pauseRequested.value = true;
+  try {
+    await cancelYuqueExport(url, dir);
+    ElMessage.info('正在暂停，将在当前篇下载完成后停止…');
+  } catch (err: any) {
+    pauseRequested.value = false;
+    ElMessage.error(err.message || '暂停失败');
+  }
+}
+
+async function handleRestartExport() {
+  const url = shareUrl.value.trim();
+  const dir = saveDir.value.trim();
+  if (!url || !dir) return ElMessage.warning('请先填写链接并选择保存目录');
+  try {
+    await ElMessageBox.confirm(
+      '将清除该知识库在本地的导出进度记录（不会删除已下载的文件）。重置后请修改选项，再点「批量导出知识库」从头开始。',
+      '重新开始导出',
+      { type: 'warning', confirmButtonText: '确认重置', cancelButtonText: '取消' },
+    );
+  } catch {
+    return;
+  }
+  if (batchExportRunning.value) {
+    await cancelYuqueExport(url, dir);
+  }
+  try {
+    await resetYuqueExport(url, dir);
+    batchResult.value = null;
+    exportProgress.value = null;
+    progressDetail.value = null;
+    pauseRequested.value = false;
+    resumeExport.value = false;
+    await refreshProgressDetail();
+    ElMessage.success('进度已重置，请修改选项后重新导出');
+  } catch (err: any) {
+    ElMessage.error(err.message || '重置失败');
+  }
 }
 
 /** 分享链接模式下，仅有 /用户/知识库 时无法批量导出 */
@@ -466,12 +529,28 @@ async function handlePreview() {
   }
 }
 
+async function confirmYuqueDisclaimer(): Promise<boolean> {
+  try {
+    await ElMessageBox.confirm(YUQUE_DISCLAIMER_CONFIRM, YUQUE_DISCLAIMER_TITLE, {
+      confirmButtonText: '我已阅读并同意',
+      cancelButtonText: '取消',
+      type: 'warning',
+      customClass: 'yuque-disclaimer-box',
+      dangerouslyUseHTMLString: false,
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 async function handleExport() {
   const url = shareUrl.value.trim();
   if (!url) return ElMessage.warning('请粘贴语雀分享链接');
   if (!saveDir.value) return ElMessage.warning('请先选择保存目录');
   const exportFormat = resolveExportFormat();
   if (!exportFormat) return ElMessage.warning('请至少勾选一种导出格式（Markdown 或 Confluence 网页）');
+  if (!(await confirmYuqueDisclaimer())) return;
   loading.value = true;
   batchResult.value = null;
   try {
@@ -482,18 +561,25 @@ async function handleExport() {
       }
       if (!bookCatalog.value.length) {
         ElMessage.warning('无法获取知识库目录，请先点「预览知识库」，或等待语雀限流解除后再试');
+        stopProgressPolling();
         return;
       }
+      batchExportRunning.value = true;
+      pauseRequested.value = false;
       startProgressPolling();
 
       const token = authMode.value === 'token' ? yuqueToken.value.trim() : '';
       if (authMode.value === 'token' && !token) {
         ElMessage.warning('请填写语雀 Token');
+        stopProgressPolling();
+        batchExportRunning.value = false;
         return;
       }
       const shareIssue = authMode.value === 'share' ? shareLinkBatchIssue(url) : null;
       if (shareIssue) {
         ElMessage.error({ message: shareIssue, duration: 10000, showClose: true });
+        stopProgressPolling();
+        batchExportRunning.value = false;
         return;
       }
       const result = await exportYuqueBatch({
@@ -525,7 +611,13 @@ async function handleExport() {
       };
       lastResult.value = { filePath: result.bookDir, fileName: result.bookName, bookDir: result.bookDir };
       await refreshProgressDetail();
-      if (result.stoppedEarly) {
+      pauseRequested.value = false;
+      if (result.paused) {
+        ElMessage.success({
+          message: `已暂停（已完成 ${result.exported}/${result.total}）。可修改选项后点「继续导出」。`,
+          duration: 8000,
+        });
+      } else if (result.stoppedEarly) {
         ElMessage.warning({
           message: `导出因错误已暂停（已完成 ${result.exported}/${result.total}）。进度已保存，几小时后用相同链接和目录点「继续导出」即可从失败处重试。`,
           duration: 12000,
@@ -573,6 +665,7 @@ async function handleExport() {
     await refreshProgressDetail();
   } finally {
     loading.value = false;
+    batchExportRunning.value = false;
     if (batchMode.value) {
       stopProgressPolling();
     }
@@ -590,6 +683,19 @@ async function handleExport() {
         </p>
       </div>
       <ClearCacheButton module="yuque" :save-dir="saveDir" :url="shareUrl" @cleared="handleClearYuque" />
+    </div>
+
+    <div class="disclaimer-card" role="note">
+      <p class="disclaimer-title">{{ YUQUE_DISCLAIMER_TITLE }}</p>
+      <ul class="disclaimer-list">
+        <li v-for="(line, i) in YUQUE_DISCLAIMER_LINES" :key="i">{{ line }}</li>
+      </ul>
+      <p class="disclaimer-foot">
+        语雀官方协议：
+        <a href="https://www.yuque.com/terms" target="_blank" rel="noopener">服务协议</a>
+        ·
+        <a href="https://www.yuque.com/privacy" target="_blank" rel="noopener">隐私权政策</a>
+      </p>
     </div>
 
     <div v-if="batchMode" class="field export-mode-card">
@@ -743,17 +849,42 @@ async function handleExport() {
     </div>
 
     <div class="actions">
-      <el-button :loading="loading" @click="handlePreview">
+      <el-button :loading="loading && !batchExportRunning" @click="handlePreview">
         {{ batchMode ? '预览知识库' : '预览识别' }}
       </el-button>
-      <el-button type="primary" :loading="loading" @click="handleExport">{{ exportLabel }}</el-button>
+      <el-button type="primary" :loading="loading" :disabled="batchExportRunning" @click="handleExport">
+        {{ exportLabel }}
+      </el-button>
+      <el-button
+        v-if="batchMode && batchExportRunning"
+        type="warning"
+        plain
+        @click="handlePauseExport"
+      >
+        暂停导出
+      </el-button>
+      <el-button
+        v-if="batchMode && hasExportProgress && !batchExportRunning"
+        type="danger"
+        plain
+        @click="handleRestartExport"
+      >
+        重新开始
+      </el-button>
     </div>
+    <p v-if="batchMode && batchExportRunning" class="mode-tip pause-tip">
+      暂停会在<strong>当前这篇</strong>下载完成后生效，进度会自动保存。
+    </p>
+    <p v-else-if="batchMode && exportPaused" class="mode-tip pause-tip">
+      导出已暂停。修改格式、图片、间隔等选项后，勾选「继续上次导出」并点「继续导出」即可。
+    </p>
 
     <div v-if="showProgressPanel" class="progress-panel">
       <div class="progress-panel-head">
         <strong>{{ exportingActive ? '导出进度' : '知识库目录' }}：{{ progressBookName }}</strong>
         <span v-if="bookPreview?.total" class="catalog-total">共 {{ bookPreview.total }} 篇</span>
         <span v-if="exportingActive" class="live-tag">实时更新中</span>
+        <span v-else-if="exportPaused" class="live-tag paused-tag">已暂停</span>
       </div>
       <p v-if="showCatalogHint" class="catalog-hint">
         下方为知识库全部文档。✓ 已导出 · ✗ 失败 · ○ 待导出。点「批量导出知识库」后状态会实时更新。
@@ -814,7 +945,44 @@ async function handleExport() {
   align-items: flex-start;
   justify-content: space-between;
   gap: 16px;
+  margin-bottom: 16px;
+}
+
+.disclaimer-card {
   margin-bottom: 20px;
+  padding: 14px 16px;
+  border-radius: 10px;
+  border: 1px solid rgba(234, 179, 8, 0.35);
+  background: rgba(234, 179, 8, 0.08);
+
+  .disclaimer-title {
+    margin: 0 0 8px;
+    font-size: 13px;
+    font-weight: 700;
+    color: #ca8a04;
+  }
+
+  .disclaimer-list {
+    margin: 0;
+    padding-left: 18px;
+    font-size: 12px;
+    line-height: 1.65;
+    color: var(--text-muted);
+
+    li + li {
+      margin-top: 4px;
+    }
+  }
+
+  .disclaimer-foot {
+    margin: 10px 0 0;
+    font-size: 12px;
+    color: var(--text-muted);
+
+    a {
+      color: #60a5fa;
+    }
+  }
 }
 
 h2 {
@@ -1051,6 +1219,11 @@ h2 {
     font-size: 12px;
     color: #60a5fa;
     animation: pulse 1.5s ease-in-out infinite;
+
+    &.paused-tag {
+      color: #f59e0b;
+      animation: none;
+    }
   }
 
   .catalog-total {
@@ -1064,6 +1237,10 @@ h2 {
   font-size: 12px;
   color: var(--text-muted);
   margin: -4px 0 10px;
+}
+
+.pause-tip {
+  margin: -4px 0 12px;
 }
 
 @keyframes pulse {

@@ -214,6 +214,18 @@ fn yuque_export_progress(
 }
 
 #[tauri::command]
+fn cancel_yuque_export(url: String, save_dir: String) -> Result<serde_json::Value, String> {
+    yuque::cancel_yuque_export(&save_dir, &url);
+    Ok(serde_json::json!({ "requested": true }))
+}
+
+#[tauri::command]
+fn reset_yuque_export(url: String, save_dir: String) -> Result<serde_json::Value, String> {
+    yuque::reset_yuque_export(&save_dir, &url);
+    Ok(serde_json::json!({ "cleared": true }))
+}
+
+#[tauri::command]
 fn confluence_list(source_dir: String, recursive: Option<bool>) -> Result<serde_json::Value, String> {
     confluence::confluence_list(&source_dir, recursive.unwrap_or(true))
 }
@@ -251,6 +263,8 @@ pub fn run() {
             export_yuque,
             export_yuque_batch,
             yuque_export_progress,
+            cancel_yuque_export,
+            reset_yuque_export,
             confluence_list,
             confluence_preview,
             confluence_convert,

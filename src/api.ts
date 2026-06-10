@@ -255,6 +255,7 @@ export async function exportYuqueBatch(params: {
     failedCount: number;
     resume: boolean;
     stoppedEarly?: boolean;
+    paused?: boolean;
     delayMode: string;
     success: { title: string; filePath: string; folderPath: string | null; relativePath?: string }[];
     failed: { title: string; slug: string; dirPath?: string; message: string }[];
@@ -270,6 +271,15 @@ export async function exportYuqueBatch(params: {
 export function clearYuqueProgress(url: string, saveDir: string) {
   saveYuqueProgress(url, saveDir, null);
   return Promise.resolve({ clearedCount: 1 });
+}
+
+export async function cancelYuqueExport(url: string, saveDir: string) {
+  return invokeOk<{ requested: boolean }>('cancel_yuque_export', { url, saveDir });
+}
+
+export async function resetYuqueExport(url: string, saveDir: string) {
+  await invokeOk<{ cleared: boolean }>('reset_yuque_export', { url, saveDir });
+  clearYuqueProgress(url, saveDir);
 }
 
 export async function listConfluenceFiles(sourceDir: string, recursive = true) {
