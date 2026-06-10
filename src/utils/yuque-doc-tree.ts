@@ -26,6 +26,7 @@ export interface ExportProgressDetail {
   completed?: number;
   remaining?: number;
   failedCount?: number;
+  status?: string;
   currentSlug?: string | null;
   completedSlugs?: string[];
   failed?: { slug: string; title?: string; message: string }[];
