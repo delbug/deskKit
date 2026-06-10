@@ -5,6 +5,7 @@ import type { ElTree } from 'element-plus';
 import ClearCacheButton from '@/components/ClearCacheButton.vue';
 import {
   convertToConfluence,
+  getHealth,
   listConfluenceFiles,
   openFolder,
   pickFolder,
@@ -273,19 +274,18 @@ function syncPreviewFileAfterScan(files: typeof fileList.value) {
 
 async function checkServerReady() {
   try {
-    const res = await fetch('/api/health');
-    const data = await res.json();
+    const data = await getHealth();
     const features: string[] = data.features || [];
     if (!features.includes('confluence')) {
       serverReady.value = false;
-      serverHint.value = '当前后端版本较旧，缺少 Confluence 接口。请在项目目录执行：npm run restart';
+      serverHint.value = '当前版本缺少 Confluence 功能，请更新 DeskKit 到最新版本。';
     } else {
       serverReady.value = true;
       serverHint.value = '';
     }
   } catch {
     serverReady.value = false;
-    serverHint.value = '无法连接后端服务，请先运行：npm run boot 或 npm start';
+    serverHint.value = 'DeskKit 后端未就绪，请重启应用。';
   }
 }
 
