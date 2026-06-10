@@ -1,0 +1,37 @@
+[package]
+name = "deskkit"
+version = "1.0.0"
+description = "DeskKit — 本地文件与文档工具集"
+authors = ["吴江"]
+edition = "2021"
+
+[lib]
+name = "deskkit_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-opener = "2"
+tauri-plugin-dialog = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+walkdir = "2"
+md5 = "0.7"
+regex = "1"
+reqwest = { version = "0.12", features = ["json", "rustls-tls"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "fs"] }
+scraper = "0.22"
+pulldown-cmark = "0.12"
+chrono = { version = "0.4", features = ["serde"] }
+rand = "0.8"
+base64 = "0.22"
+url = "2"
+docx-rs = "0.4"
+once_cell = "1"
+thiserror = "1"
+mime_guess = "2"
+percent-encoding = "2"
+pathdiff = "0.2"
