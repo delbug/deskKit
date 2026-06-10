@@ -1,6 +1,6 @@
 [package]
 name = "deskkit"
-version = "1.0.0"
+version = "1.0.1"
 description = "DeskKit — 本地文件与文档工具集"
 authors = ["吴江"]
 edition = "2021"

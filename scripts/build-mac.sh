@@ -16,11 +16,12 @@ echo "==> Mac Intel (x64)"
 npx tauri build --target x86_64-apple-darwin
 
 mkdir -p release
-ARM64_DMG="src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/DeskKit_1.0.0_aarch64.dmg"
-X64_DMG="src-tauri/target/x86_64-apple-darwin/release/bundle/dmg/DeskKit_1.0.0_x64.dmg"
+VERSION="$(node -p "require('./package.json').version")"
+ARM64_DMG="src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/DeskKit_${VERSION}_aarch64.dmg"
+X64_DMG="src-tauri/target/x86_64-apple-darwin/release/bundle/dmg/DeskKit_${VERSION}_x64.dmg"
 
-cp -f "$ARM64_DMG" release/DeskKit-1.0.0-mac-arm64.dmg
-cp -f "$X64_DMG" release/DeskKit-1.0.0-mac-intel.dmg
+cp -f "$ARM64_DMG" "release/DeskKit-${VERSION}-mac-arm64.dmg"
+cp -f "$X64_DMG" "release/DeskKit-${VERSION}-mac-intel.dmg"
 
 echo ""
 echo "==> 完成！Mac 安装包："
