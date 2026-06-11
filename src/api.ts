@@ -23,11 +23,22 @@ import {
   saveYuqueProgress,
 } from '@/utils/appStorage';
 
+function formatInvokeError(err: unknown): string {
+  if (err instanceof Error && err.message.trim()) return err.message.trim();
+  if (typeof err === 'string' && err.trim()) return err.trim();
+  if (err && typeof err === 'object' && 'message' in err) {
+    const message = (err as { message?: unknown }).message;
+    if (typeof message === 'string' && message.trim()) return message.trim();
+  }
+  const fallback = String(err ?? '').trim();
+  return fallback || '操作失败，请稍后重试';
+}
+
 async function invokeOk<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
   try {
     return await invoke<T>(cmd, args);
   } catch (err) {
-    throw new Error(String(err));
+    throw new Error(formatInvokeError(err));
   }
 }
 

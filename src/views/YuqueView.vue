@@ -43,6 +43,21 @@ import {
   YUQUE_DISCLAIMER_TITLE,
 } from '@/constants/yuque-disclaimer';
 
+const YUQUE_DISCLAIMER_DISMISSED_KEY = 'yuque-disclaimer-dismissed';
+
+const showDisclaimerCard = ref(
+  sessionStorage.getItem(YUQUE_DISCLAIMER_DISMISSED_KEY) !== '1',
+);
+
+function dismissDisclaimerCard() {
+  showDisclaimerCard.value = false;
+  try {
+    sessionStorage.setItem(YUQUE_DISCLAIMER_DISMISSED_KEY, '1');
+  } catch {
+    /* ignore */
+  }
+}
+
 const shareUrl = ref('');
 const saveDir = ref('');
 const downloadImages = ref(true);
@@ -84,6 +99,7 @@ const batchResult = ref<{
   resume: boolean;
 } | null>(null);
 const resumeExport = ref(true);
+const actionFeedback = ref<{ kind: 'success' | 'warning' | 'error' | 'info'; text: string } | null>(null);
 const exportProgress = ref<{
   bookName: string;
   total: number;
@@ -353,41 +369,111 @@ async function refreshProgressDetail() {
 
 let catalogLoading = false;
 
+function formatErr(err: unknown): string {
+  if (err instanceof Error && err.message.trim()) return err.message.trim();
+  if (typeof err === 'string' && err.trim()) return err.trim();
+  return '操作失败，请检查链接、Token 与网络后重试';
+}
+
+function notifyYuque(
+  kind: 'success' | 'warning' | 'error' | 'info',
+  message: string,
+  opts?: { toast?: boolean; persist?: boolean },
+) {
+  const text = message.trim();
+  if (!text) return;
+  if (opts?.persist !== false) {
+    actionFeedback.value = { kind, text };
+  }
+  if (opts?.toast === false) return;
+  const payload = { message: text.replace(/\n+/g, ' '), duration: kind === 'error' ? 10000 : 8000, showClose: true };
+  if (kind === 'success') ElMessage.success(payload);
+  else if (kind === 'warning') ElMessage.warning(payload);
+  else if (kind === 'info') ElMessage.info(payload);
+  else ElMessage.error(payload);
+}
+
+const RATE_LIMIT_HINT =
+  '语雀 API 请求过于频繁，请等待 5~10 分钟后再点「预览知识库」或「继续导出」。已有进度可从本地记录恢复，无需重新拉目录。';
+
+function isRateLimitMessage(msg: string): boolean {
+  return /too many|rate.?limit|过于频繁|429/i.test(msg);
+}
+
+/** 批量预览前的链接与认证校验 */
+function validateBatchPreviewInput(url: string): string | null {
+  if (authMode.value === 'share') {
+    return shareLinkBatchIssue(url);
+  }
+  try {
+    const u = new URL(/^https?:\/\//i.test(url) ? url : `https://${url}`);
+    if (!u.hostname.includes('yuque.com')) {
+      return '链接不是语雀地址，请填写形如 yuque.com/用户/知识库 的知识库链接';
+    }
+    const parts = u.pathname.split('/').filter(Boolean);
+    if (parts.length < 2) {
+      return '知识库链接格式不正确，需要至少包含「用户/知识库」，例如 yuque.com/your-name/your-repo';
+    }
+    return null;
+  } catch {
+    return '链接格式无效，请检查是否完整粘贴';
+  }
+}
+
 async function loadBookCatalog(silent = false) {
   const url = shareUrl.value.trim();
-  if (!url || !batchMode.value) return;
+  if (!url) {
+    if (!silent) notifyYuque('warning', '请粘贴语雀链接');
+    return false;
+  }
+  if (!batchMode.value) {
+    if (!silent) notifyYuque('warning', '请先切换到「批量导出整个知识库」模式');
+    return false;
+  }
   const token = authMode.value === 'token' ? yuqueToken.value.trim() : '';
   if (authMode.value === 'token' && !token) {
-    if (!silent) ElMessage.warning('请填写语雀 Token');
-    return;
+    if (!silent) notifyYuque('warning', '请填写语雀 Token（头像 → 设置 → Token 中创建）');
+    return false;
   }
-  if (authMode.value === 'share' && shareLinkBatchIssue(url)) return;
-  if (catalogLoading) return;
+  const inputIssue = validateBatchPreviewInput(url);
+  if (inputIssue) {
+    notifyYuque('error', inputIssue, { toast: !silent });
+    return false;
+  }
+  if (catalogLoading) {
+    if (!silent) notifyYuque('info', '正在加载知识库目录，请稍候…');
+    return false;
+  }
   catalogLoading = true;
   try {
     if (!silent) loading.value = true;
     const data = await previewYuqueBook(url, token || undefined);
     bookPreview.value = data;
-    bookCatalog.value = data.docs;
+    bookCatalog.value = data.docs ?? [];
     if (!selectedSlugs.value.length) {
-      selectedSlugs.value = data.docs.map((d) => d.slug);
+      selectedSlugs.value = bookCatalog.value.map((d) => d.slug);
     }
     await refreshProgressDetail();
+    if (!bookCatalog.value.length) {
+      notifyYuque('warning', `已连接知识库「${data.bookName}」，但未找到可导出的文档。`, { toast: !silent });
+      return true;
+    }
     if (!silent) {
       persistAuthSettings();
-      ElMessage.success(`知识库「${data.bookName}」共 ${data.total} 篇文档（${data.authMode === 'token' ? 'API' : '分享链接'}）`);
+      notifyYuque(
+        'success',
+        `知识库「${data.bookName}」共 ${data.total} 篇文档（${data.authMode === 'token' ? 'API' : '分享链接'}）`,
+      );
     }
-  } catch (err: any) {
-    const msg = String(err.message || '');
-    if (/too many/i.test(msg)) {
-      ElMessage.warning({
-        message: '语雀 API 请求过于频繁，请等待 5~10 分钟后再点「预览知识库」或「继续导出」。已有进度可从本地记录恢复，无需重新拉目录。',
-        duration: 10000,
-        showClose: true,
-      });
-    } else if (!silent) {
-      ElMessage.error({ message: msg, duration: 8000, showClose: true });
+    return true;
+  } catch (err: unknown) {
+    const msg = formatErr(err);
+    if (isRateLimitMessage(msg)) {
+      notifyYuque('warning', RATE_LIMIT_HINT, { toast: !silent });
+    } else {
+      notifyYuque('error', msg || '预览知识库失败，请检查链接、Token 与网络', { toast: !silent });
     }
+    return false;
   } finally {
     catalogLoading = false;
     if (!silent) loading.value = false;
@@ -614,8 +700,12 @@ async function pickSaveDir() {
 }
 
 async function handlePreview() {
+  actionFeedback.value = null;
   const url = shareUrl.value.trim();
-  if (!url) return ElMessage.warning('请粘贴语雀分享链接');
+  if (!url) {
+    notifyYuque('warning', '请粘贴语雀分享链接');
+    return;
+  }
   preview.value = null;
   lastResult.value = null;
   batchResult.value = null;
@@ -628,9 +718,10 @@ async function handlePreview() {
   try {
     const data = await previewYuque(url, standardMarkdown.value);
     preview.value = data;
-    ElMessage.success(`已识别：${data.title}`);
-  } catch (err: any) {
-    ElMessage.error({ message: err.message, duration: 8000, showClose: true });
+    notifyYuque('success', `已识别：${data.title}`);
+  } catch (err: unknown) {
+    const msg = formatErr(err);
+    notifyYuque('error', msg || '预览识别失败，请检查分享链接是否有效');
   } finally {
     loading.value = false;
   }
@@ -800,7 +891,15 @@ async function handleExport() {
       <ClearCacheButton module="yuque" :save-dir="saveDir" :url="shareUrl" @cleared="handleClearYuque" />
     </div>
 
-    <div class="disclaimer-card" role="note">
+    <div v-if="showDisclaimerCard" class="disclaimer-card" role="note">
+      <button
+        type="button"
+        class="disclaimer-close"
+        aria-label="关闭"
+        @click="dismissDisclaimerCard"
+      >
+        <el-icon><Close /></el-icon>
+      </button>
       <p class="disclaimer-title">{{ YUQUE_DISCLAIMER_TITLE }}</p>
       <ul class="disclaimer-list">
         <li v-for="(line, i) in YUQUE_DISCLAIMER_LINES" :key="i">{{ line }}</li>
@@ -993,6 +1092,16 @@ async function handleExport() {
       </div>
     </div>
 
+    <el-alert
+      v-if="actionFeedback"
+      class="action-feedback"
+      :title="actionFeedback.text"
+      :type="actionFeedback.kind"
+      show-icon
+      :closable="actionFeedback.kind !== 'error'"
+      @close="actionFeedback = null"
+    />
+
     <div class="actions">
       <el-button :loading="loading && !batchExportRunning" @click="handlePreview">
         {{ batchMode ? '预览知识库' : '预览识别' }}
@@ -1094,11 +1203,39 @@ async function handleExport() {
 }
 
 .disclaimer-card {
+  position: relative;
   margin-bottom: 20px;
-  padding: 14px 16px;
+  padding: 14px 36px 14px 16px;
   border-radius: 10px;
   border: 1px solid rgba(234, 179, 8, 0.35);
   background: rgba(234, 179, 8, 0.08);
+
+  .disclaimer-close {
+    position: absolute;
+    top: 8px;
+    right: 8px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 24px;
+    height: 24px;
+    padding: 0;
+    border: none;
+    border-radius: 6px;
+    background: transparent;
+    color: var(--text-muted);
+    cursor: pointer;
+    transition: color 0.15s, background 0.15s;
+
+    &:hover {
+      color: var(--text);
+      background: rgba(0, 0, 0, 0.06);
+    }
+
+    .el-icon {
+      font-size: 14px;
+    }
+  }
 
   .disclaimer-title {
     margin: 0 0 8px;
@@ -1270,6 +1407,17 @@ h2 {
 .grow {
   flex: 1;
   min-width: 280px;
+}
+
+.action-feedback {
+  margin-bottom: 12px;
+  white-space: pre-wrap;
+  word-break: break-word;
+
+  :deep(.el-alert__title) {
+    white-space: pre-wrap;
+    line-height: 1.6;
+  }
 }
 
 .actions {
