@@ -70,10 +70,11 @@ const renameRules = reactive<RenameRules>({
 });
 
 const patternPlaceholder = computed(() => {
-  if (matchMode.value === 'name') return '关键词或通配符，如 report 或 *.tmp';
+  if (matchMode.value === 'name') return '关键词或通配符，如 report、*.tmp 或 .*（隐藏文件）';
   if (matchMode.value === 'suffix') return '后缀，如 .bak 或 _copy';
-  if (matchMode.value === 'extension') return '扩展名，如 md, txt, pdf（可逗号分隔）';
-  return '正则表达式，如 ^IMG_\\d+\\.jpg$';
+  if (matchMode.value === 'extension') return '扩展名，如 md, txt, env（可逗号分隔，含 .env）';
+  if (matchMode.value === 'dot') return '可选：env、gitignore；留空列出全部 . 开头文件';
+  return '正则表达式，如 ^\\.env$ 或 ^\\..+';
 });
 
 const filteredFiles = computed(() => {
@@ -173,7 +174,7 @@ onMounted(() => {
   const savedPath = localStorage.getItem('find-files-last-path');
   if (savedPath) rootPath.value = savedPath;
   const savedMode = localStorage.getItem('find-files-match-mode');
-  if (savedMode === 'name' || savedMode === 'suffix' || savedMode === 'extension' || savedMode === 'regex') {
+  if (savedMode === 'name' || savedMode === 'suffix' || savedMode === 'extension' || savedMode === 'regex' || savedMode === 'dot') {
     matchMode.value = savedMode;
   }
   const savedPattern = localStorage.getItem('find-files-pattern');
@@ -201,7 +202,7 @@ function persistSettings() {
 
 async function scan() {
   if (!rootPath.value) return ElMessage.warning('请选择要搜索的文件夹');
-  if (!pattern.value.trim() && matchMode.value !== 'extension') {
+  if (!pattern.value.trim() && matchMode.value !== 'extension' && matchMode.value !== 'dot') {
     return ElMessage.warning('请填写匹配内容');
   }
   persistSettings();
@@ -421,6 +422,7 @@ function handleClearFindFiles() {
           <el-radio value="name">名称 / 通配符</el-radio>
           <el-radio value="suffix">后缀</el-radio>
           <el-radio value="extension">扩展名 / 格式</el-radio>
+          <el-radio value="dot">隐藏文件（. 开头）</el-radio>
           <el-radio value="regex">正则表达式</el-radio>
         </el-radio-group>
       </div>
@@ -449,10 +451,11 @@ function handleClearFindFiles() {
         </template>
       </div>
       <p class="mode-tip">
-        <template v-if="matchMode === 'name'">支持包含关键词，或使用 <code>*</code>、<code>?</code> 通配符（如 <code>*.log</code>）。</template>
+        <template v-if="matchMode === 'name'">支持包含关键词，或使用 <code>*</code>、<code>?</code> 通配符；用 <code>.*</code> 可匹配以 <code>.</code> 开头的隐藏文件名。</template>
         <template v-else-if="matchMode === 'suffix'">匹配文件名末尾，例如 <code>.bak</code>、<code>_final</code>。</template>
-        <template v-else-if="matchMode === 'extension'">按文件类型筛选，例如 <code>md, html, png</code>。</template>
-        <template v-else>正则默认匹配文件名；勾选「匹配完整相对路径」可匹配如 <code>backup/.*\\.tmp$</code>。</template>
+        <template v-else-if="matchMode === 'extension'">按文件类型筛选，例如 <code>md, html, env</code>；对 <code>.env</code> 这类隐藏文件也可填 <code>env</code>。</template>
+        <template v-else-if="matchMode === 'dot'">列出文件名以 <code>.</code> 开头的隐藏文件；匹配内容留空=全部，或填 <code>env</code>、<code>gitignore</code> 等进一步过滤。默认跳过 <code>.git</code>、<code>.DS_Store</code> 等系统项。</template>
+        <template v-else>正则默认匹配文件名；勾选「匹配完整相对路径」可匹配如 <code>backup/.*\\.tmp$</code>；查隐藏文件可用 <code>^\\..+</code>。</template>
       </p>
     </div>
 

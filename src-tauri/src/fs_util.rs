@@ -69,6 +69,7 @@ pub fn walk_files(root: &Path, extra_ignore: &[String]) -> HashMap<String, FileM
 #[derive(Debug, Clone, Default)]
 pub struct WalkFilterOptions {
     pub min_size_bytes: u64,
+    pub max_size_bytes: u64,
     pub extension_mode: CompareExtensionMode,
     pub extensions: Vec<String>,
 }
@@ -126,6 +127,7 @@ pub fn walk_files_filtered(
 ) -> HashMap<String, FileMeta> {
     let WalkFilterOptions {
         min_size_bytes,
+        max_size_bytes,
         extension_mode,
         extensions,
     } = options;
@@ -157,6 +159,9 @@ pub fn walk_files_filtered(
         }
         if let Ok(st) = fs::metadata(ent) {
             if min_size_bytes > 0 && st.len() < min_size_bytes {
+                continue;
+            }
+            if max_size_bytes > 0 && st.len() > max_size_bytes {
                 continue;
             }
             let mtime = st
@@ -384,5 +389,23 @@ mod tests {
         );
         assert_eq!(no_txt.len(), 1);
         assert!(no_txt.contains_key("a.pdf"));
+    }
+
+    #[test]
+    fn walk_files_filtered_skips_files_above_max_size() {
+        let root = tempfile::tempdir().unwrap();
+        write_temp_file(root.path(), "tiny.txt", b"x");
+        write_temp_file(root.path(), "large.bin", &vec![0u8; 2048]);
+
+        let filtered = walk_files_filtered(
+            root.path(),
+            &[],
+            WalkFilterOptions {
+                max_size_bytes: 1024,
+                ..Default::default()
+            },
+        );
+        assert_eq!(filtered.len(), 1);
+        assert!(filtered.contains_key("tiny.txt"));
     }
 }

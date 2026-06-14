@@ -51,6 +51,11 @@ export interface AppSettings {
   ignorePatterns: string[];
   defaultSyncStrategy: string;
   compareMinSizeKb?: number;
+  compareMaxSizeKb?: number;
+  compareSizeFilterEnabled?: boolean;
+  compareMinSizeValue?: number;
+  compareMaxSizeValue?: number;
+  compareSizeUnit?: 'KB' | 'MB' | 'GB';
   compareExtensionMode?: CompareExtensionMode;
   compareExtensions?: string[];
 }
@@ -173,7 +178,7 @@ export interface DuplicateGroup {
   files: { relativePath: string; absolutePath: string; size: number }[];
 }
 
-export type FindFilesMatchMode = 'name' | 'suffix' | 'extension' | 'regex';
+export type FindFilesMatchMode = 'name' | 'suffix' | 'extension' | 'regex' | 'dot';
 
 export interface FindFileEntry {
   relativePath: string;
@@ -205,6 +210,14 @@ export interface Md5RenameResult {
   skipped: number;
   dryRun: boolean;
   errors: string[];
+}
+
+export interface Md5RandomizeResult {
+  modified: number;
+  skipped: number;
+  dryRun: boolean;
+  errors: string[];
+  details: { relativePath: string; oldMd5?: string | null; newMd5?: string | null }[];
 }
 
 export interface Md5VerifyResult {

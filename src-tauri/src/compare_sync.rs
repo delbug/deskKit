@@ -214,6 +214,7 @@ pub async fn compare_folders(
     mode: CompareMode,
     ignore_patterns: Vec<String>,
     min_size_kb: Option<u64>,
+    max_size_kb: Option<u64>,
     extension_mode: CompareExtensionMode,
     compare_extensions: Vec<String>,
 ) -> Result<CompareResult, FsError> {
@@ -222,6 +223,11 @@ pub async fn compare_folders(
     }
     if extension_mode != CompareExtensionMode::None && compare_extensions.is_empty() {
         return Err(FsError::Message("请选择至少一种文件格式".into()));
+    }
+    if let (Some(min_kb), Some(max_kb)) = (min_size_kb, max_size_kb) {
+        if min_kb > 0 && max_kb > 0 && min_kb > max_kb {
+            return Err(FsError::Message("最小文件大小不能大于最大文件大小".into()));
+        }
     }
 
     let mut folders = folders;
@@ -235,6 +241,7 @@ pub async fn compare_folders(
 
     let walk_options = crate::fs_util::WalkFilterOptions {
         min_size_bytes: min_size_kb.unwrap_or(0).saturating_mul(1024),
+        max_size_bytes: max_size_kb.unwrap_or(0).saturating_mul(1024),
         extension_mode,
         extensions: compare_extensions,
     };
@@ -994,6 +1001,7 @@ mod tests {
             CompareMode::Name,
             vec![],
             Some(1),
+            None,
             CompareExtensionMode::None,
             vec![],
         )
@@ -1006,6 +1014,7 @@ mod tests {
             folders,
             CompareMode::Name,
             vec![],
+            None,
             None,
             CompareExtensionMode::None,
             vec![],
@@ -1048,6 +1057,7 @@ mod tests {
             CompareMode::Name,
             vec![],
             None,
+            None,
             CompareExtensionMode::Include,
             vec!["pdf".into()],
         )
@@ -1056,6 +1066,50 @@ mod tests {
 
         assert_eq!(result.stats.total, 1);
         assert_eq!(result.entries[0].relative_path, "doc.pdf");
+        assert_eq!(result.stats.identical, 1);
+    }
+
+    #[tokio::test]
+    async fn compare_folders_excludes_files_above_max_size_kb() {
+        let base = tempfile::tempdir().unwrap();
+        let dir_a = base.path().join("a");
+        let dir_b = base.path().join("b");
+        std::fs::create_dir_all(&dir_a).unwrap();
+        std::fs::create_dir_all(&dir_b).unwrap();
+
+        write_file(&dir_a, "tiny.txt", b"x");
+        write_file(&dir_a, "large.bin", &vec![0u8; 2048]);
+        write_file(&dir_b, "tiny.txt", b"x");
+
+        let folders = vec![
+            FolderItem {
+                id: "a".into(),
+                path: dir_a.to_string_lossy().into_owned(),
+                label: String::new(),
+                is_primary: true,
+            },
+            FolderItem {
+                id: "b".into(),
+                path: dir_b.to_string_lossy().into_owned(),
+                label: String::new(),
+                is_primary: false,
+            },
+        ];
+
+        let result = compare_folders(
+            folders,
+            CompareMode::Name,
+            vec![],
+            None,
+            Some(1),
+            CompareExtensionMode::None,
+            vec![],
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result.stats.total, 1);
+        assert_eq!(result.entries[0].relative_path, "tiny.txt");
         assert_eq!(result.stats.identical, 1);
     }
 }

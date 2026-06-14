@@ -38,7 +38,10 @@ const selectedPaths = ref<Set<string>>(new Set());
 const syncStrategy = ref<SyncStrategy>('primary-overwrite');
 const syncTargetId = ref('');
 const syncSourceId = ref('');
-const minSizeKb = ref(0);
+const sizeFilterEnabled = ref(false);
+const minSizeValue = ref<number | undefined>(undefined);
+const maxSizeValue = ref<number | undefined>(undefined);
+const sizeUnit = ref<'KB' | 'MB' | 'GB'>('KB');
 const extensionMode = ref<CompareExtensionMode>('none');
 const compareExtensions = ref<string[]>([]);
 const favName = ref('');
@@ -126,17 +129,43 @@ watch(() => route.path, async (p) => {
   }
 });
 
+function toSizeKb(value: number | undefined, unit: 'KB' | 'MB' | 'GB'): number | undefined {
+  if (value == null || value <= 0 || Number.isNaN(value)) return undefined;
+  if (unit === 'KB') return Math.floor(value);
+  if (unit === 'MB') return Math.floor(value * 1024);
+  return Math.floor(value * 1024 * 1024);
+}
+
+function resolveCompareSizeKb() {
+  if (!sizeFilterEnabled.value) return { minKb: undefined, maxKb: undefined };
+  return {
+    minKb: toSizeKb(minSizeValue.value, sizeUnit.value),
+    maxKb: toSizeKb(maxSizeValue.value, sizeUnit.value),
+  };
+}
+
 async function initFromConfig() {
   await load();
   if (config.value?.settings?.compareMode) compareMode.value = config.value.settings.compareMode;
-  if (config.value?.settings?.compareMinSizeKb != null) {
-    minSizeKb.value = config.value.settings.compareMinSizeKb;
+
+  const s = config.value?.settings;
+  if (s?.compareSizeFilterEnabled != null) {
+    sizeFilterEnabled.value = s.compareSizeFilterEnabled;
+    sizeUnit.value = s.compareSizeUnit === 'MB' || s.compareSizeUnit === 'GB' ? s.compareSizeUnit : 'KB';
+    minSizeValue.value = s.compareMinSizeValue;
+    maxSizeValue.value = s.compareMaxSizeValue;
+  } else if (s?.compareMinSizeKb || s?.compareMaxSizeKb) {
+    sizeFilterEnabled.value = true;
+    sizeUnit.value = 'KB';
+    minSizeValue.value = s.compareMinSizeKb || undefined;
+    maxSizeValue.value = s.compareMaxSizeKb || undefined;
   }
-  if (config.value?.settings?.compareExtensionMode) {
-    extensionMode.value = config.value.settings.compareExtensionMode;
+
+  if (s?.compareExtensionMode) {
+    extensionMode.value = s.compareExtensionMode;
   }
-  if (config.value?.settings?.compareExtensions?.length) {
-    compareExtensions.value = [...config.value.settings.compareExtensions];
+  if (s?.compareExtensions?.length) {
+    compareExtensions.value = [...s.compareExtensions];
   }
   const restored = restoreFolders();
   if (restored) {
@@ -238,6 +267,10 @@ async function runCompare() {
   if (extensionMode.value !== 'none' && compareExtensions.value.length === 0) {
     return ElMessage.warning('请选择至少一种文件格式');
   }
+  const { minKb, maxKb } = resolveCompareSizeKb();
+  if (minKb != null && maxKb != null && minKb > maxKb) {
+    return ElMessage.warning('最小文件大小不能大于最大文件大小');
+  }
   loading.value = true;
   selectedPaths.value = new Set();
   selectedExtensions.value = [];
@@ -247,7 +280,8 @@ async function runCompare() {
       valid,
       compareMode.value,
       config.value?.settings?.ignorePatterns,
-      minSizeKb.value,
+      minKb,
+      maxKb,
       extensionMode.value,
       extensionMode.value === 'none' ? undefined : normalizedExtensions,
     );
@@ -259,7 +293,12 @@ async function runCompare() {
       await persist({
         settings: {
           ...config.value.settings,
-          compareMinSizeKb: minSizeKb.value,
+          compareSizeFilterEnabled: sizeFilterEnabled.value,
+          compareMinSizeValue: minSizeValue.value,
+          compareMaxSizeValue: maxSizeValue.value,
+          compareSizeUnit: sizeUnit.value,
+          compareMinSizeKb: minKb,
+          compareMaxSizeKb: maxKb,
           compareExtensionMode: extensionMode.value,
           compareExtensions: extensionMode.value === 'none' ? [] : normalizedExtensions,
         },
@@ -509,7 +548,6 @@ function handleClearCompare() {
                   />
                   <div class="folder-card-actions">
                     <el-button
-                      size="small"
                       class="folder-action-btn"
                       :type="folder.isPrimary ? 'primary' : 'default'"
                       @click="setPrimary(folder.id)"
@@ -517,7 +555,6 @@ function handleClearCompare() {
                       <el-icon><Star /></el-icon> 主
                     </el-button>
                     <el-button
-                      size="small"
                       class="folder-action-btn folder-action-btn-icon"
                       type="danger"
                       plain
@@ -537,7 +574,7 @@ function handleClearCompare() {
               </el-button>
               <div class="fav-save-row">
                 <el-input v-model="favName" size="small" placeholder="收藏名称（可选）" />
-                <el-button size="small" type="warning" class="fav-save-btn" @click="saveAsFavorite">
+                <el-button type="warning" class="fav-save-btn" @click="saveAsFavorite">
                   <el-icon><Star /></el-icon> 保存
                 </el-button>
               </div>
@@ -551,12 +588,33 @@ function handleClearCompare() {
               <el-radio value="name">仅路径</el-radio>
             </el-radio-group>
             <div class="min-size-field">
-              <label>最小文件大小</label>
-              <div class="min-size-row">
-                <el-input-number v-model="minSizeKb" :min="0" :max="999999" :step="1" controls-position="right" />
-                <span class="min-size-unit">KB 以上才参与对比</span>
-              </div>
-              <p class="min-size-hint">设为 0 表示不限制；小文件会被跳过，可显著加快 MD5 对比。</p>
+              <el-checkbox v-model="sizeFilterEnabled">按文件大小筛选</el-checkbox>
+              <template v-if="sizeFilterEnabled">
+                <div class="min-size-row">
+                  <span class="size-bound-label">最小</span>
+                  <el-input-number
+                    v-model="minSizeValue"
+                    :min="0"
+                    :step="1"
+                    controls-position="right"
+                    class="size-input"
+                  />
+                  <span class="size-bound-label">最大</span>
+                  <el-input-number
+                    v-model="maxSizeValue"
+                    :min="0"
+                    :step="1"
+                    controls-position="right"
+                    class="size-input"
+                  />
+                  <el-select v-model="sizeUnit" size="small" class="size-unit-select">
+                    <el-option label="KB" value="KB" />
+                    <el-option label="MB" value="MB" />
+                    <el-option label="GB" value="GB" />
+                  </el-select>
+                </div>
+                <p class="min-size-hint">最小 = 该大小以上；最大 = 该大小以下。留空表示不限制该端，单位可自由切换。</p>
+              </template>
             </div>
             <div class="ext-compare-field">
               <label>文件格式范围</label>
@@ -888,10 +946,9 @@ function handleClearCompare() {
 }
 
 .folder-action-btn-icon {
-  width: 36px;
-  min-width: 36px;
-  padding-left: 0;
-  padding-right: 0;
+  width: 32px;
+  min-width: 32px;
+  padding: 0;
 }
 
 .sidebar-actions {
@@ -1024,6 +1081,21 @@ function handleClearCompare() {
   align-items: center;
   gap: 8px;
   flex-wrap: wrap;
+  margin-bottom: 6px;
+}
+
+.size-bound-label {
+  font-size: 12px;
+  color: var(--text-muted);
+  flex-shrink: 0;
+}
+
+.size-input {
+  width: 120px;
+}
+
+.size-unit-select {
+  width: 72px;
 }
 
 .min-size-unit {

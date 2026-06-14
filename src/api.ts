@@ -10,6 +10,7 @@ import type {
   FindFilesMatchMode,
   FolderItem,
   Md5FileEntry,
+  Md5RandomizeResult,
   Md5RenameMode,
   Md5RenameResult,
   Md5ScanResult,
@@ -71,6 +72,7 @@ export async function compareFolders(
   mode: CompareMode,
   ignorePatterns?: string[],
   minSizeKb?: number,
+  maxSizeKb?: number,
   extensionMode?: CompareExtensionMode,
   compareExtensions?: string[],
 ) {
@@ -80,6 +82,7 @@ export async function compareFolders(
     mode,
     ignorePatterns,
     minSizeKb: minSizeKb && minSizeKb > 0 ? minSizeKb : undefined,
+    maxSizeKb: maxSizeKb && maxSizeKb > 0 ? maxSizeKb : undefined,
     extensionMode: modeExt === 'include' ? 'include' : modeExt === 'exclude' ? 'exclude' : 'none',
     compareExtensions: compareExtensions?.map((e) => e.trim().replace(/^\./, '').toLowerCase()).filter(Boolean),
   });
@@ -436,11 +439,10 @@ export async function pickFilePath() {
   return { path: data.path || '' };
 }
 
-export async function scanMd5(path: string, minSizeKb?: number, ignorePatterns?: string[]) {
+export async function scanMd5(path: string, ignorePatterns?: string[]) {
   const patterns = ignorePatterns ?? loadAppConfig().settings.ignorePatterns;
   return invokeOk<Md5ScanResult>('scan_md5', {
     path,
-    minSizeKb: minSizeKb && minSizeKb > 0 ? minSizeKb : undefined,
     ignorePatterns: patterns,
   });
 }
@@ -459,6 +461,18 @@ export async function batchRenameByMd5(
     rootPath,
     entries: entries.map((e) => ({ relativePath: e.relativePath, md5: e.md5 })),
     mode,
+    dryRun,
+  });
+}
+
+export async function batchRandomizeMd5(
+  rootPath: string,
+  relativePaths: string[],
+  dryRun = false,
+) {
+  return invokeOk<Md5RandomizeResult>('batch_randomize_md5', {
+    rootPath,
+    relativePaths,
     dryRun,
   });
 }

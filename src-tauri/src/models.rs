@@ -334,6 +334,24 @@ pub struct Md5RenameResult {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct Md5RandomizeDetail {
+    pub relative_path: String,
+    pub old_md5: Option<String>,
+    pub new_md5: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Md5RandomizeResult {
+    pub modified: usize,
+    pub skipped: usize,
+    pub dry_run: bool,
+    pub errors: Vec<String>,
+    pub details: Vec<Md5RandomizeDetail>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Md5VerifyResult {
     pub matched: usize,
     pub mismatched: usize,

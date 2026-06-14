@@ -1,7 +1,9 @@
 use crate::fs_util::{file_meta_for_path, hash_files, md5_file, resolve_safe_dir, walk_files_filtered, WalkFilterOptions, FsError};
-use crate::models::{FileMeta, Md5RenameItem, Md5RenameMode, Md5RenameResult, Md5ScanResult, Md5ScanStats, Md5VerifyResult};
+use crate::models::{FileMeta, Md5RandomizeDetail, Md5RandomizeResult, Md5RenameItem, Md5RenameMode, Md5RenameResult, Md5ScanResult, Md5ScanStats, Md5VerifyResult};
+use rand::Rng;
 use std::collections::HashMap;
-use std::fs;
+use std::fs::{self, OpenOptions};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 fn min_size_bytes(min_size_kb: Option<u64>) -> u64 {
@@ -190,6 +192,96 @@ pub fn batch_rename_by_md5(
         skipped,
         dry_run,
         errors,
+    })
+}
+
+fn resolve_file_path(root: &Path, root_is_file: bool, root_dir: &Path, relative_path: &str) -> PathBuf {
+    if root_is_file {
+        root.to_path_buf()
+    } else {
+        root_dir.join(relative_path)
+    }
+}
+
+pub fn batch_randomize_md5(
+    root_path: &str,
+    relative_paths: Vec<String>,
+    dry_run: bool,
+) -> Result<Md5RandomizeResult, FsError> {
+    let root = PathBuf::from(root_path.trim());
+    if !root.exists() {
+        return Err(FsError::Message(format!("根路径不存在: {root_path}")));
+    }
+    let root_is_file = root.is_file();
+    let root_dir = if root_is_file {
+        root.parent()
+            .ok_or_else(|| FsError::Message("无法解析文件所在目录".into()))?
+            .to_path_buf()
+    } else {
+        resolve_safe_dir(root_path)?
+    };
+
+    let paths: Vec<String> = if root_is_file {
+        vec![root
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("file")
+            .to_string()]
+    } else if relative_paths.is_empty() {
+        return Err(FsError::Message("请选择要修改的文件".into()));
+    } else {
+        relative_paths
+    };
+
+    let mut modified = 0usize;
+    let skipped = 0usize;
+    let mut errors: Vec<String> = Vec::new();
+    let mut details: Vec<Md5RandomizeDetail> = Vec::new();
+
+    for relative_path in paths {
+        let file_path = resolve_file_path(&root, root_is_file, &root_dir, &relative_path);
+        if !file_path.is_file() {
+            errors.push(format!("文件不存在: {relative_path}"));
+            continue;
+        }
+        let old_md5 = match md5_file(&file_path) {
+            Ok(h) => Some(h),
+            Err(e) => {
+                errors.push(format!("无法读取 {relative_path}: {e}"));
+                continue;
+            }
+        };
+        if dry_run {
+            modified += 1;
+            details.push(Md5RandomizeDetail {
+                relative_path,
+                old_md5,
+                new_md5: None,
+            });
+            continue;
+        }
+        let mut suffix = [0u8; 32];
+        rand::thread_rng().fill(&mut suffix);
+        OpenOptions::new()
+            .append(true)
+            .open(&file_path)
+            .and_then(|mut f| f.write_all(&suffix))
+            .map_err(FsError::Io)?;
+        let new_md5 = md5_file(&file_path).map_err(FsError::Io)?;
+        modified += 1;
+        details.push(Md5RandomizeDetail {
+            relative_path,
+            old_md5,
+            new_md5: Some(new_md5),
+        });
+    }
+
+    Ok(Md5RandomizeResult {
+        modified,
+        skipped,
+        dry_run,
+        errors,
+        details,
     })
 }
 
@@ -419,5 +511,19 @@ mod tests {
         assert!(file.exists(), "dry run must not rename");
         let expected_stem = format!("photo_{hash}");
         assert!(Path::new(&expected_stem).file_stem().unwrap().to_str().unwrap().starts_with("photo_"));
+    }
+
+    #[test]
+    fn batch_randomize_md5_changes_file_hash() {
+        let root = tempfile::tempdir().unwrap();
+        let file = write_file(root.path(), "a.txt", b"hello");
+        let old = md5_file(&file).unwrap();
+
+        let result = batch_randomize_md5(root.path().to_str().unwrap(), vec!["a.txt".into()], false).unwrap();
+        assert_eq!(result.modified, 1);
+        let new = md5_file(&file).unwrap();
+        assert_ne!(old, new);
+        assert_eq!(result.details[0].old_md5.as_deref(), Some(old.as_str()));
+        assert_eq!(result.details[0].new_md5.as_deref(), Some(new.as_str()));
     }
 }

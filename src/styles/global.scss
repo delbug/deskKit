@@ -41,6 +41,47 @@ body {
   --el-button-hover-border-color: var(--primary-hover);
 }
 
+/* 全站普通按钮统一尺寸（与语雀导出区一致） */
+.el-button:not(.is-link) {
+  height: 32px;
+  min-height: 32px;
+  padding: 8px 15px;
+  font-size: 14px;
+}
+
+.el-button.el-button--small:not(.is-link) {
+  height: 32px;
+  min-height: 32px;
+  padding: 8px 15px;
+  font-size: 14px;
+}
+
+.el-button.is-circle,
+.el-button.folder-action-btn-icon {
+  width: 32px;
+  min-width: 32px;
+  height: 32px;
+  padding: 0;
+}
+
+.toolbar,
+.action-bar,
+.action-group,
+.md5-toolbar,
+.md5-actions,
+.compare-toolbar,
+.find-toolbar,
+.rename-primary-actions,
+.rename-path-actions,
+.fav-save-row,
+.folder-card-actions,
+.sidebar-actions {
+  .el-button:not(.is-link) {
+    margin-left: 0;
+    margin-right: 0;
+  }
+}
+
 .app-shell {
   display: flex;
   flex-direction: column;

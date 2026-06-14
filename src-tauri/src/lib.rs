@@ -94,6 +94,7 @@ async fn compare_folders(
     mode: CompareMode,
     ignore_patterns: Option<Vec<String>>,
     min_size_kb: Option<u64>,
+    max_size_kb: Option<u64>,
     extension_mode: Option<CompareExtensionMode>,
     compare_extensions: Option<Vec<String>>,
 ) -> Result<CompareResult, String> {
@@ -102,6 +103,7 @@ async fn compare_folders(
         mode,
         ignore_patterns.unwrap_or_default(),
         min_size_kb,
+        max_size_kb,
         extension_mode.unwrap_or(CompareExtensionMode::None),
         compare_extensions.unwrap_or_default(),
     )
@@ -386,6 +388,16 @@ fn batch_rename_by_md5(
 }
 
 #[tauri::command]
+fn batch_randomize_md5(
+    root_path: String,
+    relative_paths: Vec<String>,
+    dry_run: Option<bool>,
+) -> Result<Md5RandomizeResult, String> {
+    md5_tool::batch_randomize_md5(&root_path, relative_paths, dry_run.unwrap_or(false))
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 fn verify_md5_manifest(entries: Vec<FileMeta>, manifest_text: String) -> Result<Md5VerifyResult, String> {
     Ok(md5_tool::verify_md5_manifest(&entries, &manifest_text))
 }
@@ -424,6 +436,7 @@ pub fn run() {
             scan_md5,
             export_md5_manifest,
             batch_rename_by_md5,
+            batch_randomize_md5,
             verify_md5_manifest,
             write_text_file,
             read_text_file,

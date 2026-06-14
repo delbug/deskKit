@@ -10,6 +10,29 @@ fn file_name_from_rel(relative_path: &str) -> &str {
         .unwrap_or(relative_path)
 }
 
+fn is_dot_prefixed(name: &str) -> bool {
+    name.starts_with('.') && name != "." && name != ".."
+}
+
+fn matches_dot_prefixed(pattern: &str, file_name: &str, case_sensitive: bool) -> Result<bool, String> {
+    let pattern = pattern.trim();
+    if pattern.is_empty() {
+        return Ok(is_dot_prefixed(file_name));
+    }
+    if pattern.contains('*') || pattern.contains('?') {
+        let re_pat = glob_to_regex(pattern);
+        let re = compile_regex(&re_pat, case_sensitive)?;
+        return Ok(is_dot_prefixed(file_name) && re.is_match(file_name));
+    }
+    if case_sensitive {
+        Ok(is_dot_prefixed(file_name) && (file_name.contains(pattern) || file_name == pattern))
+    } else {
+        let lower = file_name.to_lowercase();
+        let p = pattern.to_lowercase();
+        Ok(is_dot_prefixed(file_name) && (lower.contains(&p) || lower == p))
+    }
+}
+
 fn glob_to_regex(glob: &str) -> String {
     let mut re = String::from("^");
     for c in glob.chars() {
@@ -79,10 +102,16 @@ fn matches_extension(pattern: &str, file_name: &str) -> bool {
     if exts.is_empty() {
         return true;
     }
-    let Some(ext) = extension_of(file_name) else {
-        return false;
-    };
-    exts.iter().any(|e| e == &ext)
+    if let Some(ext) = extension_of(file_name) {
+        if exts.iter().any(|e| e == &ext) {
+            return true;
+        }
+    }
+    if is_dot_prefixed(file_name) {
+        let body = &file_name[1..];
+        return exts.iter().any(|e| body == *e || body.ends_with(&format!(".{e}")));
+    }
+    false
 }
 
 fn matches_regex(
@@ -99,7 +128,7 @@ fn matches_regex(
 }
 
 pub fn find_files(root: &Path, params: &FindFilesParams) -> Result<(Vec<FindFileEntry>, FindFilesStats), String> {
-    if params.pattern.trim().is_empty() && params.match_mode != "extension" {
+    if params.pattern.trim().is_empty() && !matches!(params.match_mode.as_str(), "extension" | "dot" | "hidden") {
         return Err("请填写匹配内容".into());
     }
 
@@ -135,6 +164,9 @@ pub fn find_files(root: &Path, params: &FindFilesParams) -> Result<(Vec<FindFile
                 &relative_path,
                 params.match_full_path,
             ),
+            "dot" | "hidden" => {
+                matches_dot_prefixed(params.pattern.trim(), file_name, params.case_sensitive)?
+            }
             other => return Err(format!("不支持的匹配模式: {other}")),
         };
 
@@ -157,4 +189,66 @@ pub fn find_files(root: &Path, params: &FindFilesParams) -> Result<(Vec<FindFile
     };
 
     Ok((matched, stats))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    fn write_file(dir: &Path, name: &str, bytes: &[u8]) {
+        let path = dir.join(name);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        let mut f = std::fs::File::create(&path).unwrap();
+        f.write_all(bytes).unwrap();
+    }
+
+    #[test]
+    fn find_dot_prefixed_files() {
+        let root = tempfile::tempdir().unwrap();
+        write_file(root.path(), ".env", b"1");
+        write_file(root.path(), ".gitignore", b"2");
+        write_file(root.path(), "normal.txt", b"3");
+        write_file(root.path(), ".hidden/inside", b"4");
+
+        let params = FindFilesParams {
+            root_path: String::new(),
+            ignore_patterns: vec![],
+            match_mode: "dot".into(),
+            pattern: String::new(),
+            case_sensitive: false,
+            match_full_path: false,
+            min_size: None,
+            max_size: None,
+        };
+        let (files, stats) = find_files(root.path(), &params).unwrap();
+        assert_eq!(stats.count, 2);
+        assert!(files.iter().any(|f| f.relative_path == ".env"));
+        assert!(files.iter().any(|f| f.relative_path == ".gitignore"));
+        assert!(!files.iter().any(|f| f.relative_path == "normal.txt"));
+        assert!(!files.iter().any(|f| f.relative_path == ".hidden/inside"));
+    }
+
+    #[test]
+    fn find_dot_file_by_name_glob() {
+        let root = tempfile::tempdir().unwrap();
+        write_file(root.path(), ".env", b"1");
+        write_file(root.path(), "x.env", b"2");
+
+        let params = FindFilesParams {
+            root_path: String::new(),
+            ignore_patterns: vec![],
+            match_mode: "name".into(),
+            pattern: ".*".into(),
+            case_sensitive: false,
+            match_full_path: false,
+            min_size: None,
+            max_size: None,
+        };
+        let (files, _) = find_files(root.path(), &params).unwrap();
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].relative_path, ".env");
+    }
 }
