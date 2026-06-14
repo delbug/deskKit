@@ -73,14 +73,16 @@ async function onPickFile() {
   if (!res.cancelled) rootPath.value = res.path;
 }
 
-async function runScan() {
+async function runScan(showSuccess = true) {
   if (!rootPath.value.trim()) return ElMessage.warning('请选择文件或文件夹路径');
   localStorage.setItem('md5-last-path', rootPath.value);
   loading.value = true;
   selected.value = new Set();
   try {
     scanResult.value = await scanMd5(rootPath.value, config.value?.settings?.ignorePatterns);
-    ElMessage.success(`已计算 ${scanResult.value.stats.total} 个文件的 MD5`);
+    if (showSuccess) {
+      ElMessage.success(`已计算 ${scanResult.value.stats.total} 个文件的 MD5`);
+    }
   } catch (err: unknown) {
     ElMessage.error(err instanceof Error ? err.message : String(err));
   } finally {
@@ -147,7 +149,7 @@ async function runRandomize(dryRun: boolean) {
       ElMessage.info(`预览：将修改 ${res.modified} 个文件`);
     } else {
       ElMessage.success(`已修改 ${res.modified} 个文件的 MD5`);
-      await runScan();
+      await runScan(false);
     }
     if (res.errors.length) {
       ElMessage.warning(res.errors.slice(0, 3).join('；'));
