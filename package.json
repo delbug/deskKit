@@ -1,7 +1,7 @@
 {
   "name": "deskkit",
   "private": true,
-  "version": "1.0.7",
+  "version": "1.0.8",
   "description": "DeskKit — 本地文件与文档工具集 (Tauri)",
   "type": "module",
   "engines": {

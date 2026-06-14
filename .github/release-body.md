@@ -1,4 +1,7 @@
-## DeskKit v1.0.7
+## DeskKit v1.0.8
+
+### 修复
+- MD5 随机修改成功后不再重复弹出两条成功提示
 
 ### 文件夹对比
 - **文件大小筛选**：可开关；支持设置最小/最大范围，单位可选 KB / MB / GB
@@ -9,7 +12,7 @@
 - 扩展名模式支持无后缀隐藏文件（例如填 `env` 可匹配 `.env`）
 - 文件名通配符 `.*`、正则 `^\..+` 亦可用于隐藏文件
 
-### MD5 工具（新）
+### MD5 工具
 - 选择文件或文件夹，扫描并计算 MD5，表格展示、点击复制
 - 导出 MD5 清单
 - **随机修改 MD5**：在文件末尾追加随机数据以改变哈希
@@ -26,8 +29,8 @@
 ### 下载说明
 | 平台 | 文件 |
 |------|------|
-| macOS Apple 芯片 | `DeskKit-1.0.7-mac-arm64.dmg` |
-| macOS Intel | `DeskKit-1.0.7-mac-intel.dmg` |
-| Windows | `DeskKit-1.0.7-windows-setup.exe` / `.msi` |
+| macOS Apple 芯片 | `DeskKit-1.0.8-mac-arm64.dmg` |
+| macOS Intel | `DeskKit-1.0.8-mac-intel.dmg` |
+| Windows | `DeskKit-1.0.8-windows-setup.exe` / `.msi` |
 
 Mac 首次打开若被系统拦截：右键 → **打开**。
