@@ -168,7 +168,8 @@ jobs:
         with:
           tag_name: ${{ github.event_name == 'workflow_dispatch' && needs.prepare-release.outputs.tag || github.ref_name }}
           draft: false
-          generate_release_notes: true
+          generate_release_notes: false
+          body_path: .github/release-body.md
           files: release-assets/*
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
