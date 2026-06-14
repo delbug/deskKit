@@ -1,5 +1,5 @@
 use crate::confluence;
-use crate::fs_util::{safe_file_name, unique_dir_path, unique_file_path};
+use crate::fs_util::{safe_file_name, unique_file_path};
 use crate::models::{
     YuqueBatchParams, YuqueDocManifestItem, YuqueDocPreview, YuqueExportFormat, YuqueExportParams,
     YuqueFailedItem, YuqueProgressState,
@@ -52,6 +52,37 @@ pub struct YuqueDocPlan {
     pub title: String,
     pub slug: String,
     pub dir_segments: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub doc_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub doc_id: Option<u64>,
+}
+
+#[derive(Debug, Clone)]
+struct YuqueDocMeta {
+    doc_type: String,
+    doc_id: Option<u64>,
+}
+
+fn doc_type_label(doc_type: &str) -> &'static str {
+    match doc_type.trim().to_ascii_uppercase().as_str() {
+        "SHEET" => "表格",
+        "TABLE" => "数据表",
+        "BOARD" => "画板",
+        "DOC" | "DOCUMENT" => "文档",
+        _ => "文档",
+    }
+}
+
+fn is_spreadsheet_doc_type(doc_type: &str) -> bool {
+    matches!(
+        doc_type.trim().to_ascii_uppercase().as_str(),
+        "SHEET" | "TABLE"
+    )
+}
+
+fn is_board_doc_type(doc_type: &str) -> bool {
+    doc_type.trim().eq_ignore_ascii_case("BOARD")
 }
 
 #[derive(Debug, Clone)]
@@ -267,46 +298,256 @@ async fn http_get_bytes(url: &str) -> Result<Vec<u8>, String> {
     resp.bytes().await.map(|b| b.to_vec()).map_err(|e| e.to_string())
 }
 
-pub fn build_export_plan(toc: &[Value]) -> Vec<YuqueDocPlan> {
-    let mut title_path_by_uuid: HashMap<String, Vec<String>> = HashMap::new();
-    let mut plan = Vec::new();
+struct TocEntry {
+    uuid: String,
+    node_type: String,
+    title: String,
+    parent_uuid: Option<String>,
+    slug: Option<String>,
+}
 
+fn container_segments(
+    uuid: &str,
+    entries: &HashMap<String, TocEntry>,
+    cache: &mut HashMap<String, Vec<String>>,
+    visiting: &mut HashSet<String>,
+) -> Vec<String> {
+    if let Some(c) = cache.get(uuid) {
+        return c.clone();
+    }
+    if visiting.contains(uuid) {
+        return vec![];
+    }
+    visiting.insert(uuid.to_string());
+    let entry = match entries.get(uuid) {
+        Some(e) => e,
+        None => {
+            visiting.remove(uuid);
+            return vec![];
+        }
+    };
+    let mut segments = entry
+        .parent_uuid
+        .as_ref()
+        .and_then(|pid| entries.get(pid))
+        .map(|p| container_segments(&p.uuid, entries, cache, visiting))
+        .unwrap_or_default();
+    match entry.node_type.as_str() {
+        "TITLE" | "DOC" => segments.push(safe_file_name(&entry.title)),
+        _ => {}
+    }
+    visiting.remove(uuid);
+    cache.insert(uuid.to_string(), segments.clone());
+    segments
+}
+
+fn toc_item_slug(item: &Value) -> Option<String> {
+    for key in ["url", "slug"] {
+        let Some(raw) = item.get(key).and_then(|v| v.as_str()) else {
+            continue;
+        };
+        let s = raw.trim();
+        if s.is_empty() {
+            continue;
+        }
+        if s.contains('/') {
+            return Some(
+                s.trim_end_matches('/')
+                    .rsplit('/')
+                    .next()
+                    .unwrap_or(s)
+                    .to_string(),
+            );
+        }
+        return Some(s.to_string());
+    }
+    None
+}
+
+fn parse_toc_parent_uuid(item: &Value) -> Option<String> {
+    match item.get("parent_uuid") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(s)) if s.is_empty() => None,
+        Some(Value::String(s)) => Some(s.clone()),
+        _ => None,
+    }
+}
+
+fn repair_toc_parent_links(toc: &[Value], entries: &mut HashMap<String, TocEntry>) {
     for item in toc {
-        let item_type = item.get("type").and_then(|v| v.as_str()).unwrap_or("");
+        let Some(parent_uuid) = item.get("uuid").and_then(|v| v.as_str()).filter(|s| !s.is_empty()) else {
+            continue;
+        };
+        let mut child_uuid = item
+            .get("child_uuid")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .map(String::from);
+        let mut inherited_parent = Some(parent_uuid.to_string());
+        while let Some(cid) = child_uuid {
+            if let Some(entry) = entries.get_mut(&cid) {
+                if entry.parent_uuid.is_none() {
+                    entry.parent_uuid = inherited_parent.clone();
+                }
+                inherited_parent = entry.parent_uuid.clone();
+            }
+            child_uuid = toc
+                .iter()
+                .find(|i| i.get("uuid").and_then(|v| v.as_str()) == Some(cid.as_str()))
+                .and_then(|i| i.get("sibling_uuid").and_then(|v| v.as_str()))
+                .filter(|s| !s.is_empty())
+                .map(String::from);
+        }
+    }
+}
+
+fn parse_toc_entries(toc: &[Value]) -> HashMap<String, TocEntry> {
+    let mut entries: HashMap<String, TocEntry> = HashMap::new();
+    for item in toc {
+        let item_type = item
+            .get("type")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_uppercase();
         let uuid = item.get("uuid").and_then(|v| v.as_str()).unwrap_or("");
-        if item_type == "TITLE" {
-            let parent_segments = item
-                .get("parent_uuid")
+        if uuid.is_empty() {
+            continue;
+        }
+        if item_type != "TITLE" && item_type != "DOC" && item_type != "LINK" {
+            continue;
+        }
+        let title = item
+            .get("title")
+            .and_then(|v| v.as_str())
+            .unwrap_or(if item_type == "DOC" {
+                "未命名文档"
+            } else {
+                "未命名分组"
+            });
+        entries.insert(
+            uuid.to_string(),
+            TocEntry {
+                uuid: uuid.to_string(),
+                node_type: item_type,
+                title: title.to_string(),
+                parent_uuid: parse_toc_parent_uuid(item),
+                slug: toc_item_slug(item),
+            },
+        );
+    }
+    repair_toc_parent_links(toc, &mut entries);
+    entries
+}
+
+fn dir_segments_for_uuid(
+    uuid: &str,
+    entries: &HashMap<String, TocEntry>,
+    cache: &mut HashMap<String, Vec<String>>,
+) -> Vec<String> {
+    let entry = match entries.get(uuid) {
+        Some(e) => e,
+        None => return vec![],
+    };
+    let mut visiting = HashSet::new();
+    entry
+        .parent_uuid
+        .as_ref()
+        .and_then(|pid| entries.get(pid))
+        .map(|p| container_segments(&p.uuid, entries, cache, &mut visiting))
+        .unwrap_or_default()
+}
+
+fn dir_segments_for_slug(
+    slug: &str,
+    entries: &HashMap<String, TocEntry>,
+    cache: &mut HashMap<String, Vec<String>>,
+) -> Option<Vec<String>> {
+    let uuid = entries
+        .values()
+        .find(|e| e.node_type == "DOC" && e.slug.as_deref() == Some(slug))
+        .map(|e| e.uuid.clone())?;
+    Some(dir_segments_for_uuid(&uuid, entries, cache))
+}
+
+pub fn build_export_plan(toc: &[Value]) -> Vec<YuqueDocPlan> {
+    let entries = parse_toc_entries(toc);
+    let mut cache: HashMap<String, Vec<String>> = HashMap::new();
+    let mut plan = Vec::new();
+    for entry in entries.values() {
+        if entry.node_type != "DOC" {
+            continue;
+        }
+        let slug = match &entry.slug {
+            Some(s) => s.clone(),
+            None => continue,
+        };
+        let dir_segments = dir_segments_for_uuid(&entry.uuid, &entries, &mut cache);
+        plan.push(YuqueDocPlan {
+            title: entry.title.clone(),
+            slug,
+            dir_segments,
+            doc_type: None,
+            doc_id: None,
+        });
+    }
+    plan
+}
+
+async fn supplement_plan_from_docs_api(
+    token: &str,
+    ns_path: &str,
+    toc: &[Value],
+    plan: &mut Vec<YuqueDocPlan>,
+) -> Result<(), String> {
+    let mut known: HashSet<String> = plan.iter().map(|d| d.slug.clone()).collect();
+    let entries = parse_toc_entries(toc);
+    let mut cache: HashMap<String, Vec<String>> = HashMap::new();
+    let mut offset = 0u32;
+    loop {
+        let page = api_request(
+            token,
+            &format!("/repos/{ns_path}/docs"),
+            &[
+                ("offset", offset.to_string()),
+                ("limit", "100".to_string()),
+            ],
+            0,
+        )
+        .await?;
+        let items = page.as_array().cloned().unwrap_or_default();
+        if items.is_empty() {
+            break;
+        }
+        for item in &items {
+            let slug = item
+                .get("slug")
                 .and_then(|v| v.as_str())
-                .and_then(|pid| title_path_by_uuid.get(pid).cloned())
-                .unwrap_or_default();
+                .unwrap_or("")
+                .trim();
+            if slug.is_empty() || known.contains(slug) {
+                continue;
+            }
             let title = item
                 .get("title")
                 .and_then(|v| v.as_str())
-                .unwrap_or("未命名分组");
-            let mut segments = parent_segments;
-            segments.push(safe_file_name(title));
-            title_path_by_uuid.insert(uuid.to_string(), segments);
-        } else if item_type == "DOC" {
-            if let Some(slug) = item.get("url").and_then(|v| v.as_str()) {
-                let dir_segments = item
-                    .get("parent_uuid")
-                    .and_then(|v| v.as_str())
-                    .and_then(|pid| title_path_by_uuid.get(pid).cloned())
-                    .unwrap_or_default();
-                let title = item
-                    .get("title")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or(slug);
-                plan.push(YuqueDocPlan {
-                    title: title.to_string(),
-                    slug: slug.to_string(),
-                    dir_segments,
-                });
-            }
+                .unwrap_or(slug)
+                .to_string();
+            let dir_segments = dir_segments_for_slug(slug, &entries, &mut cache).unwrap_or_default();
+            plan.push(YuqueDocPlan {
+                title,
+                slug: slug.to_string(),
+                dir_segments,
+                doc_type: item.get("type").and_then(|v| v.as_str()).map(str::to_string),
+                doc_id: item.get("id").and_then(|v| v.as_u64()),
+            });
+            known.insert(slug.to_string());
         }
+        if items.len() < 100 {
+            break;
+        }
+        offset += 100;
     }
-    plan
+    Ok(())
 }
 
 fn book_from_app_data(app_data: &Value) -> Option<YuqueBook> {
@@ -628,11 +869,13 @@ pub async fn save_yuque_doc_content(
     export_format: YuqueExportFormat,
 ) -> Result<serde_json::Value, String> {
     let doc_dir = if use_doc_folder {
-        unique_dir_path(save_dir, &safe_file_name(title))
+        let base = safe_file_name(title);
+        let candidate = save_dir.join(&base);
+        fs::create_dir_all(&candidate).map_err(|e| e.to_string())?;
+        candidate
     } else {
         save_dir.to_path_buf()
     };
-    fs::create_dir_all(&doc_dir).map_err(|e| e.to_string())?;
 
     let mut content = normalize_yuque_markdown(markdown, standard_markdown);
     let mut downloaded_images = 0usize;
@@ -693,13 +936,28 @@ pub async fn export_yuque_doc(params: YuqueExportParams) -> Result<serde_json::V
         return Err(format!("不是文件夹: {}", save_dir.display()));
     }
 
-    let (title, markdown, images, _) = fetch_yuque_doc(&params.url).await?;
+    let parsed = parse_yuque_url(&params.url)?;
+    let doc_slug = parsed
+        .doc_slug
+        .clone()
+        .ok_or_else(|| "单篇导出需要文档级链接，格式：yuque.com/用户/知识库/文档".to_string())?;
+    let (page_url, _) = build_doc_urls(&parsed, &doc_slug);
+    let html = http_get(&page_url).await.unwrap_or_default();
+    let title = extract_title_from_html(&html);
+    let doc = YuqueDocPlan {
+        title,
+        slug: doc_slug,
+        dir_segments: vec![],
+        doc_type: None,
+        doc_id: None,
+    };
     let format = normalize_export_format(params.export_format, params.export_confluence_html);
-    save_yuque_doc_content(
-        &title,
-        &markdown,
-        &images,
+    export_yuque_doc_by_plan(
+        &doc,
         &save_dir,
+        None,
+        parsed.path_prefix.as_deref(),
+        Some(&parsed),
         params.download_images,
         params.standard_markdown,
         params.use_doc_folder,
@@ -738,14 +996,20 @@ pub async fn preview_yuque_book(url: &str, token: Option<String>) -> Result<serd
         "authMode": auth_mode,
         "bookName": book.name,
         "total": book.docs.len(),
-        "docs": book.docs.iter().map(|d| YuqueDocPreview {
-            title: d.title.clone(),
-            slug: d.slug.clone(),
-            dir_path: if d.dir_segments.is_empty() {
-                "(根目录)".into()
-            } else {
-                d.dir_segments.join("/")
-            },
+        "docs": book.docs.iter().map(|d| {
+            let doc_type = d.doc_type.clone();
+            let doc_type_label = doc_type.as_ref().map(|t| doc_type_label(t).to_string());
+            YuqueDocPreview {
+                title: d.title.clone(),
+                slug: d.slug.clone(),
+                dir_path: if d.dir_segments.is_empty() {
+                    "(根目录)".into()
+                } else {
+                    d.dir_segments.join("/")
+                },
+                doc_type,
+                doc_type_label,
+            }
         }).collect::<Vec<_>>(),
     }))
 }
@@ -841,7 +1105,8 @@ pub async fn fetch_yuque_book_by_api(token: &str, url_input: &str) -> Result<(Pa
         .ok();
 
     let toc_arr = toc.as_array().cloned().unwrap_or_default();
-    let plan = build_export_plan(&toc_arr);
+    let mut plan = build_export_plan(&toc_arr);
+    supplement_plan_from_docs_api(token, &ns_path, &toc_arr, &mut plan).await?;
     if plan.is_empty() {
         return Err("API 返回的知识库目录为空，请确认 Token 有该知识库权限".into());
     }
@@ -885,6 +1150,242 @@ async fn fetch_doc_markdown_by_api(token: &str, namespace: &str, slug: &str) -> 
         return Ok(content.to_string());
     }
     Err(format!("无法获取文档正文: {slug}"))
+}
+
+async fn fetch_doc_meta_by_api(token: &str, namespace: &str, slug: &str) -> Result<YuqueDocMeta, String> {
+    let ns_path: String = namespace
+        .split('/')
+        .map(|s| urlencoding_simple(s))
+        .collect::<Vec<_>>()
+        .join("/");
+    let data = api_request(
+        token,
+        &format!("/repos/{ns_path}/docs/{}", urlencoding_simple(slug)),
+        &[],
+        0,
+    )
+    .await?;
+    Ok(YuqueDocMeta {
+        doc_type: data
+            .get("type")
+            .and_then(|v| v.as_str())
+            .unwrap_or("Doc")
+            .to_string(),
+        doc_id: data.get("id").and_then(|v| v.as_u64()),
+    })
+}
+
+async fn fetch_doc_meta_from_page(parsed: &ParsedYuqueUrl, slug: &str) -> Result<YuqueDocMeta, String> {
+    let (page_url, _) = build_doc_urls(parsed, slug);
+    let html = http_get(&page_url).await?;
+    let app_data = extract_app_data(&html).ok_or_else(|| "无法读取文档页面信息".to_string())?;
+    let doc = app_data
+        .get("doc")
+        .ok_or_else(|| "页面未包含文档数据".to_string())?;
+    Ok(YuqueDocMeta {
+        doc_type: doc
+            .get("type")
+            .and_then(|v| v.as_str())
+            .unwrap_or("Doc")
+            .to_string(),
+        doc_id: doc.get("id").and_then(|v| v.as_u64()),
+    })
+}
+
+async fn resolve_doc_meta(
+    doc: &YuqueDocPlan,
+    token: Option<&str>,
+    namespace: Option<&str>,
+    parsed: Option<&ParsedYuqueUrl>,
+) -> Result<YuqueDocMeta, String> {
+    if let Some(ref doc_type) = doc.doc_type {
+        if !doc_type.trim().is_empty() {
+            return Ok(YuqueDocMeta {
+                doc_type: doc_type.clone(),
+                doc_id: doc.doc_id,
+            });
+        }
+    }
+    if let (Some(token), Some(namespace)) = (token, namespace) {
+        return fetch_doc_meta_by_api(token, namespace, &doc.slug).await;
+    }
+    if let Some(parsed) = parsed {
+        return fetch_doc_meta_from_page(parsed, &doc.slug).await;
+    }
+    Ok(YuqueDocMeta {
+        doc_type: "Doc".into(),
+        doc_id: doc.doc_id,
+    })
+}
+
+async fn http_post_json(url: &str, body: &Value, token: Option<&str>) -> Result<Value, String> {
+    let mut req = client()
+        .post(url)
+        .header("Accept", "application/json")
+        .header("Content-Type", "application/json")
+        .header("X-Requested-With", "XMLHttpRequest")
+        .json(body);
+    if let Some(token) = token.filter(|t| !t.trim().is_empty()) {
+        req = req.header("X-Auth-Token", token.trim());
+    }
+    let resp = req.send().await.map_err(|e| e.to_string())?;
+    let status = resp.status();
+    let text = resp.text().await.map_err(|e| e.to_string())?;
+    let json: Value = serde_json::from_str(&text)
+        .map_err(|_| format!("导出接口响应非 JSON (HTTP {status})"))?;
+    if status.as_u16() >= 400 {
+        return Err(json
+            .get("message")
+            .and_then(|v| v.as_str())
+            .unwrap_or(&format!("导出接口错误 HTTP {status}"))
+            .to_string());
+    }
+    Ok(json)
+}
+
+async fn download_yuque_export_file(url: &str, token: Option<&str>) -> Result<Vec<u8>, String> {
+    let mut current = url.to_string();
+    for _ in 0..8 {
+        let mut req = client()
+            .get(&current)
+            .header("User-Agent", API_UA)
+            .header("Referer", "https://www.yuque.com/");
+        if let Some(token) = token.filter(|t| !t.trim().is_empty()) {
+            req = req.header("X-Auth-Token", token.trim());
+        }
+        let resp = req.send().await.map_err(|e| e.to_string())?;
+        if resp.status().is_redirection() {
+            let location = resp
+                .headers()
+                .get("Location")
+                .and_then(|v| v.to_str().ok())
+                .ok_or_else(|| "导出下载缺少跳转地址".to_string())?;
+            current = if location.starts_with("http") {
+                location.to_string()
+            } else {
+                format!("https://www.yuque.com{location}")
+            };
+            continue;
+        }
+        if !resp.status().is_success() {
+            return Err(format!("下载导出文件失败 HTTP {}", resp.status()));
+        }
+        return resp.bytes().await.map(|b| b.to_vec()).map_err(|e| e.to_string());
+    }
+    Err("导出文件下载跳转次数过多".into())
+}
+
+async fn export_excel_bytes_by_doc_id(doc_id: u64, token: Option<&str>) -> Result<Vec<u8>, String> {
+    let export_url = format!("https://www.yuque.com/api/docs/{doc_id}/export");
+    let payload = serde_json::json!({ "type": "excel", "force": 0 });
+    for _ in 0..24 {
+        let json = http_post_json(&export_url, &payload, token).await?;
+        let data = json.get("data").cloned().unwrap_or(Value::Null);
+        let state = data.get("state").and_then(|v| v.as_str()).unwrap_or("");
+        if state == "pending" {
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            continue;
+        }
+        if state != "success" {
+            return Err(format!(
+                "语雀 Excel 导出失败: {}",
+                json.get("message")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("未知状态")
+            ));
+        }
+        let download_path = data
+            .get("url")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| "导出成功但未返回下载地址".to_string())?;
+        let download_url = if download_path.starts_with("http") {
+            download_path.to_string()
+        } else {
+            format!("https://www.yuque.com{download_path}")
+        };
+        return download_yuque_export_file(&download_url, token).await;
+    }
+    Err("语雀 Excel 导出超时，请稍后重试".into())
+}
+
+async fn export_spreadsheet_bytes(doc_id: Option<u64>, token: Option<&str>) -> Result<Vec<u8>, String> {
+    let doc_id = doc_id.ok_or_else(|| {
+        "表格文档缺少 ID，无法导出 Excel。请使用 API Token 模式批量导出。".to_string()
+    })?;
+    export_excel_bytes_by_doc_id(doc_id, token).await
+}
+
+pub async fn save_yuque_spreadsheet_content(
+    title: &str,
+    bytes: &[u8],
+    save_dir: &Path,
+    use_doc_folder: bool,
+) -> Result<serde_json::Value, String> {
+    let doc_dir = if use_doc_folder {
+        let base = safe_file_name(title);
+        let candidate = save_dir.join(&base);
+        fs::create_dir_all(&candidate).map_err(|e| e.to_string())?;
+        candidate
+    } else {
+        save_dir.to_path_buf()
+    };
+    let base_name = safe_file_name(title);
+    let xlsx_path = unique_file_path(&doc_dir, &base_name, ".xlsx");
+    fs::write(&xlsx_path, bytes).map_err(|e| e.to_string())?;
+    Ok(serde_json::json!({
+        "title": title,
+        "fileName": xlsx_path.file_name().and_then(|n| n.to_str()).unwrap_or(""),
+        "filePath": xlsx_path.to_string_lossy(),
+        "exportFormat": "xlsx",
+        "folderPath": if use_doc_folder { Some(doc_dir.to_string_lossy().to_string()) } else { None::<String> },
+        "charCount": bytes.len(),
+    }))
+}
+
+async fn export_yuque_doc_by_plan(
+    doc: &YuqueDocPlan,
+    target_dir: &Path,
+    token: Option<&str>,
+    namespace: Option<&str>,
+    parsed: Option<&ParsedYuqueUrl>,
+    download_images: bool,
+    standard_markdown: bool,
+    use_doc_folder: bool,
+    export_format: YuqueExportFormat,
+) -> Result<serde_json::Value, String> {
+    let meta = resolve_doc_meta(doc, token, namespace, parsed).await?;
+    if is_board_doc_type(&meta.doc_type) {
+        return Err(format!(
+            "「{}」是{}，当前暂不支持导出",
+            doc.title,
+            doc_type_label(&meta.doc_type)
+        ));
+    }
+    if is_spreadsheet_doc_type(&meta.doc_type) {
+        let bytes = export_spreadsheet_bytes(meta.doc_id, token).await?;
+        return save_yuque_spreadsheet_content(&doc.title, &bytes, target_dir, use_doc_folder).await;
+    }
+
+    let markdown = if let Some(token) = token.filter(|t| !t.trim().is_empty()) {
+        let ns = namespace.ok_or_else(|| "缺少知识库命名空间".to_string())?;
+        fetch_doc_markdown_by_api(token, ns, &doc.slug).await?
+    } else {
+        let parsed = parsed.ok_or_else(|| "缺少文档链接上下文".to_string())?;
+        let (_page_url, markdown_url) = build_doc_urls(parsed, &doc.slug);
+        fetch_yuque_markdown(&markdown_url).await?
+    };
+    let images = images_from_markdown(&markdown);
+    save_yuque_doc_content(
+        &doc.title,
+        &markdown,
+        &images,
+        target_dir,
+        download_images,
+        standard_markdown,
+        use_doc_folder,
+        export_format,
+    )
+    .await
 }
 
 fn normalize_url_key(input: &str) -> String {
@@ -951,6 +1452,29 @@ fn load_progress_file(save_dir: &Path, url: &str) -> Option<YuqueProgressState> 
         return None;
     }
     Some(state)
+}
+
+fn book_export_dir(save_dir: &Path, book_name: &str) -> PathBuf {
+    save_dir.join(safe_file_name(book_name))
+}
+
+fn load_all_progress_candidates(
+    save_dir: &Path,
+    url: &str,
+    existing_progress: Option<YuqueProgressState>,
+) -> Option<YuqueProgressState> {
+    let save_dir_str = save_dir.to_string_lossy();
+    let mut candidates = Vec::new();
+    if let Some(p) = get_active_progress(&save_dir_str, url) {
+        candidates.push(p);
+    }
+    if let Some(p) = existing_progress {
+        candidates.push(p);
+    }
+    if let Some(p) = load_progress_file(save_dir, url) {
+        candidates.push(p);
+    }
+    pick_latest_progress(candidates)
 }
 
 fn pick_latest_progress(candidates: Vec<YuqueProgressState>) -> Option<YuqueProgressState> {
@@ -1026,6 +1550,7 @@ fn batch_export_result(
     skipped_count: usize,
     stopped_early: bool,
     paused: bool,
+    batch_limit_reached: bool,
     success: Vec<serde_json::Value>,
     failed: Vec<serde_json::Value>,
 ) -> serde_json::Value {
@@ -1036,11 +1561,14 @@ fn batch_export_result(
         "exported": exported_total,
         "newlyExported": newly_exported,
         "skippedCount": skipped_count,
-        "remainingCount": book.docs.len().saturating_sub(exported_total),
+        "remainingCount": book.docs.len()
+            .saturating_sub(exported_total)
+            .saturating_sub(progress.duplicate_slugs.as_ref().map(|d| d.len()).unwrap_or(0)),
         "failedCount": progress.failed.as_ref().map(|f| f.len()).unwrap_or(0),
         "resume": resumed,
         "stoppedEarly": stopped_early,
         "paused": paused,
+        "batchLimitReached": batch_limit_reached,
         "delayMode": delay_mode,
         "success": success,
         "failed": failed,
@@ -1059,11 +1587,13 @@ fn finish_paused_export(
     completed_set: &std::collections::HashSet<String>,
     newly_exported: usize,
     skipped_count: usize,
+    batch_limit_reached: bool,
     success: Vec<serde_json::Value>,
     failed: Vec<serde_json::Value>,
 ) -> Result<serde_json::Value, String> {
     progress.status = Some("paused".into());
     progress.current_slug = None;
+    progress.delay_until = None;
     progress.updated_at = Some(Utc::now().to_rfc3339());
     set_active_progress(save_dir_str, url, progress.clone());
     clear_export_cancel(save_dir_str, url);
@@ -1078,6 +1608,7 @@ fn finish_paused_export(
         skipped_count,
         false,
         true,
+        batch_limit_reached,
         success,
         failed,
     ))
@@ -1176,11 +1707,13 @@ pub fn get_export_progress_summary(
 
 fn build_progress_summary(progress: &YuqueProgressState) -> serde_json::Value {
     let completed_slugs = progress.completed_slugs.clone().unwrap_or_default();
+    let duplicate_slugs = progress.duplicate_slugs.clone().unwrap_or_default();
     let failed_list = progress.failed.clone().unwrap_or_default();
     let total = progress.total.unwrap_or(completed_slugs.len());
     let completed = completed_slugs.len();
     let failed_count = failed_list.len();
     let completed_set: std::collections::HashSet<_> = completed_slugs.iter().cloned().collect();
+    let duplicate_set: std::collections::HashSet<_> = duplicate_slugs.iter().cloned().collect();
     let failed_map: HashMap<_, _> = failed_list.iter().map(|f| (f.slug.clone(), f)).collect();
 
     let manifest = progress.doc_manifest.clone().unwrap_or_default();
@@ -1189,10 +1722,12 @@ fn build_progress_summary(progress: &YuqueProgressState) -> serde_json::Value {
         .map(|d| {
             let status = if progress.current_slug.as_deref() == Some(d.slug.as_str()) {
                 "exporting"
-            } else if completed_set.contains(&d.slug) {
-                "done"
             } else if failed_map.contains_key(&d.slug) {
                 "failed"
+            } else if duplicate_set.contains(&d.slug) {
+                "duplicate"
+            } else if completed_set.contains(&d.slug) {
+                "done"
             } else {
                 "pending"
             };
@@ -1212,13 +1747,17 @@ fn build_progress_summary(progress: &YuqueProgressState) -> serde_json::Value {
         "bookDir": progress.book_dir,
         "total": total,
         "completed": completed,
-        "remaining": total.saturating_sub(completed),
+        "remaining": total
+            .saturating_sub(completed)
+            .saturating_sub(duplicate_slugs.len()),
         "failedCount": failed_count,
         "status": progress.status,
         "updatedAt": progress.updated_at,
         "startedAt": progress.started_at,
         "currentSlug": progress.current_slug,
+        "delayUntil": progress.delay_until,
         "completedSlugs": completed_slugs,
+        "duplicateSlugs": duplicate_slugs,
         "failed": failed_list,
         "docs": docs,
         "progress": progress,
@@ -1269,6 +1808,7 @@ async fn run_yuque_batch_export<F, Fut>(
     stop_on_error: bool,
     export_order: &str,
     selected_slugs: Option<&[String]>,
+    batch_limit: Option<u32>,
     export_one: F,
 ) -> Result<serde_json::Value, String>
 where
@@ -1278,46 +1818,41 @@ where
     fs::create_dir_all(save_dir).map_err(|e| e.to_string())?;
 
     let save_dir_str = save_dir.to_string_lossy();
-    let resumed = if resume {
-        let mut candidates = Vec::new();
-        if let Some(p) = get_active_progress(&save_dir_str, url) {
-            candidates.push(p);
-        }
-        if let Some(p) = existing_progress {
-            candidates.push(p);
-        }
-        if let Some(p) = load_progress_file(save_dir, url) {
-            candidates.push(p);
-        }
-        pick_latest_progress(candidates).and_then(|p| {
-            p.book_dir
-                .as_ref()
-                .map(|d| PathBuf::from(d))
-                .filter(|d| d.exists())
-                .map(|_| p)
-        })
-    } else {
-        None
-    };
+    let saved_progress = load_all_progress_candidates(save_dir, url, existing_progress);
 
-    let (book_dir, mut progress) = if let Some(ref rp) = resumed {
-        if let Some(ref dir) = rp.book_dir {
-            (
-                PathBuf::from(dir),
-                rp.clone(),
-            )
+    let (book_dir, mut progress) = if let Some(p) = saved_progress {
+        if let Some(ref dir) = p.book_dir {
+            let path = PathBuf::from(dir);
+            if path.exists() {
+                let mut progress = p;
+                if !resume {
+                    progress.completed_slugs = Some(vec![]);
+                    progress.failed = Some(vec![]);
+                    progress.duplicate_slugs = Some(vec![]);
+                    progress.status = Some("in_progress".into());
+                    progress.current_slug = None;
+                }
+                (path, progress)
+            } else {
+                let dir = book_export_dir(save_dir, &book.name);
+                fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+                let progress = new_progress(url, auth_mode, namespace.clone(), &book.name, &dir, save_dir);
+                (dir, progress)
+            }
         } else {
-            let dir = unique_dir_path(save_dir, &safe_file_name(&book.name));
+            let dir = book_export_dir(save_dir, &book.name);
             fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
             let progress = new_progress(url, auth_mode, namespace.clone(), &book.name, &dir, save_dir);
             (dir, progress)
         }
     } else {
-        let dir = unique_dir_path(save_dir, &safe_file_name(&book.name));
+        let dir = book_export_dir(save_dir, &book.name);
         fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
         let progress = new_progress(url, auth_mode, namespace.clone(), &book.name, &dir, save_dir);
         (dir, progress)
     };
+
+    let resumed = resume && progress.completed_slugs.as_ref().is_some_and(|s| !s.is_empty());
 
     progress.total = Some(book.docs.len());
     progress.doc_manifest = Some(
@@ -1342,15 +1877,18 @@ where
 
     let mut completed_set: std::collections::HashSet<String> =
         progress.completed_slugs.clone().unwrap_or_default().into_iter().collect();
+    let mut duplicate_set: std::collections::HashSet<String> =
+        progress.duplicate_slugs.clone().unwrap_or_default().into_iter().collect();
     for doc in &book.docs {
-        if completed_set.contains(&doc.slug) {
+        if completed_set.contains(&doc.slug) || duplicate_set.contains(&doc.slug) {
             continue;
         }
         if doc_output_exists(&book_dir, doc, use_doc_folder) {
-            completed_set.insert(doc.slug.clone());
+            duplicate_set.insert(doc.slug.clone());
         }
     }
     progress.completed_slugs = Some(completed_set.iter().cloned().collect());
+    progress.duplicate_slugs = Some(duplicate_set.iter().cloned().collect());
 
     let mut success = Vec::new();
     let mut failed = Vec::new();
@@ -1361,7 +1899,20 @@ where
     clear_export_cancel(&save_dir_str, url);
 
     for (i, doc) in book.docs.iter().enumerate() {
+        if duplicate_set.contains(&doc.slug) {
+            skipped_count += 1;
+            continue;
+        }
         if completed_set.contains(&doc.slug) {
+            skipped_count += 1;
+            continue;
+        }
+
+        if doc_output_exists(&book_dir, doc, use_doc_folder) {
+            duplicate_set.insert(doc.slug.clone());
+            progress.duplicate_slugs = Some(duplicate_set.iter().cloned().collect());
+            progress.updated_at = Some(Utc::now().to_rfc3339());
+            set_active_progress(&save_dir_str, url, progress.clone());
             skipped_count += 1;
             continue;
         }
@@ -1373,11 +1924,12 @@ where
                 book,
                 &book_dir,
                 progress,
-                resumed.is_some(),
+                resumed,
                 delay_mode,
                 &completed_set,
                 newly_exported,
                 skipped_count,
+                false,
                 success,
                 failed,
             );
@@ -1391,6 +1943,7 @@ where
         fs::create_dir_all(&target_dir).map_err(|e| e.to_string())?;
 
         progress.current_slug = Some(doc.slug.clone());
+        progress.delay_until = None;
         progress.updated_at = Some(Utc::now().to_rfc3339());
         set_active_progress(&save_dir_str, url, progress.clone());
 
@@ -1410,6 +1963,24 @@ where
                 }
                 success.push(result);
                 newly_exported += 1;
+
+                if batch_limit.filter(|&l| l > 0).is_some_and(|limit| newly_exported >= limit as usize) {
+                    return finish_paused_export(
+                        &save_dir_str,
+                        url,
+                        book,
+                        &book_dir,
+                        progress,
+                        resumed,
+                        delay_mode,
+                        &completed_set,
+                        newly_exported,
+                        skipped_count,
+                        true,
+                        success,
+                        failed,
+                    );
+                }
             }
             Err(e) => {
                 let fail = YuqueFailedItem {
@@ -1450,22 +2021,34 @@ where
             && has_pending_docs(&book.docs, i + 1, &completed_set, &book_dir, use_doc_folder)
         {
             let wait = resolve_delay_ms(delay_mode, delay_fixed_sec, delay_min_sec, delay_max_sec);
+            if wait > 0 {
+                progress.delay_until = Some(
+                    (Utc::now() + chrono::Duration::milliseconds(wait as i64)).to_rfc3339(),
+                );
+                progress.updated_at = Some(Utc::now().to_rfc3339());
+                set_active_progress(&save_dir_str, url, progress.clone());
+            }
             if sleep_interruptible(&save_dir_str, url, wait).await {
+                progress.delay_until = None;
                 return finish_paused_export(
                     &save_dir_str,
                     url,
                     book,
                     &book_dir,
                     progress,
-                    resumed.is_some(),
+                    resumed,
                     delay_mode,
                     &completed_set,
                     newly_exported,
                     skipped_count,
+                    false,
                     success,
                     failed,
                 );
             }
+            progress.delay_until = None;
+            progress.updated_at = Some(Utc::now().to_rfc3339());
+            set_active_progress(&save_dir_str, url, progress.clone());
         }
     }
 
@@ -1506,12 +2089,13 @@ where
         book,
         &book_dir,
         progress,
-        resumed.is_some(),
+        resumed,
         delay_mode,
         exported_total,
         newly_exported,
         skipped_count,
         stopped_early,
+        false,
         false,
         success,
         failed,
@@ -1544,6 +2128,8 @@ fn new_progress(
         updated_at: Some(Utc::now().to_rfc3339()),
         export_order: None,
         selected_slugs: None,
+        duplicate_slugs: Some(vec![]),
+        delay_until: None,
     }
 }
 
@@ -1563,6 +2149,7 @@ pub async fn export_yuque_batch(params: YuqueBatchParams) -> Result<serde_json::
     let stop_on_error = params.stop_on_error;
     let export_order = params.export_order.clone();
     let selected_slugs = params.selected_slugs.clone();
+    let batch_limit = params.batch_limit.filter(|&l| l > 0);
 
     if let Some(ref token) = params.token {
         if !token.trim().is_empty() {
@@ -1589,6 +2176,7 @@ pub async fn export_yuque_batch(params: YuqueBatchParams) -> Result<serde_json::
                 stop_on_error,
                 &export_order,
                 selected_slugs.as_deref(),
+                batch_limit,
                 |doc, target_dir| {
                     let token = token.clone();
                     let ns = namespace.clone().unwrap_or_default();
@@ -1597,13 +2185,12 @@ pub async fn export_yuque_batch(params: YuqueBatchParams) -> Result<serde_json::
                     let fmt = format;
                     let use_doc_folder = use_doc_folder;
                     async move {
-                        let raw = fetch_doc_markdown_by_api(&token, &ns, &doc.slug).await?;
-                        let images = images_from_markdown(&raw);
-                        save_yuque_doc_content(
-                            &doc.title,
-                            &raw,
-                            &images,
+                        export_yuque_doc_by_plan(
+                            &doc,
                             &target_dir,
+                            Some(token.as_str()),
+                            Some(ns.as_str()),
+                            None,
                             dl,
                             std,
                             use_doc_folder,
@@ -1640,25 +2227,110 @@ pub async fn export_yuque_batch(params: YuqueBatchParams) -> Result<serde_json::
         stop_on_error,
         &export_order,
         selected_slugs.as_deref(),
+        batch_limit,
         move |doc, target_dir| {
             let parsed = parsed.clone();
+            let ns = namespace.clone();
             let dl = params.download_images;
             let std = params.standard_markdown;
             let fmt = format;
             let use_doc_folder = use_doc_folder;
             async move {
-                let (page_url, markdown_url) = build_doc_urls(&parsed, &doc.slug);
-                let markdown = fetch_yuque_markdown(&markdown_url).await?;
-                let html = http_get(&page_url).await.unwrap_or_default();
-                let title = if doc.title.is_empty() {
-                    extract_title_from_html(&html)
-                } else {
-                    doc.title.clone()
-                };
-                let images = images_from_markdown(&markdown);
-                save_yuque_doc_content(&title, &markdown, &images, &target_dir, dl, std, use_doc_folder, fmt).await
+                export_yuque_doc_by_plan(
+                    &doc,
+                    &target_dir,
+                    None,
+                    ns.as_deref(),
+                    Some(&parsed),
+                    dl,
+                    std,
+                    use_doc_folder,
+                    fmt,
+                )
+                .await
             }
         },
     )
     .await
+}
+
+#[cfg(test)]
+mod export_plan_tests {
+    use super::{build_export_plan, doc_type_label, is_spreadsheet_doc_type};
+    use serde_json::json;
+
+    #[test]
+    fn nested_doc_parent_builds_deep_path() {
+        let toc = vec![
+            json!({"type":"TITLE","uuid":"t1","title":"A","parent_uuid":null}),
+            json!({"type":"DOC","uuid":"d1","title":"B","parent_uuid":"t1","url":"b"}),
+            json!({"type":"DOC","uuid":"d2","title":"C","parent_uuid":"d1","url":"c"}),
+        ];
+        let plan = build_export_plan(&toc);
+        assert_eq!(plan.len(), 2);
+        let b = plan.iter().find(|d| d.slug == "b").unwrap();
+        let c = plan.iter().find(|d| d.slug == "c").unwrap();
+        assert_eq!(b.dir_segments, vec!["A"]);
+        assert_eq!(c.dir_segments, vec!["A", "B"]);
+    }
+
+    #[test]
+    fn four_level_title_chain() {
+        let toc = vec![
+            json!({"type":"TITLE","uuid":"t1","title":"L1","parent_uuid":null}),
+            json!({"type":"TITLE","uuid":"t2","title":"L2","parent_uuid":"t1"}),
+            json!({"type":"TITLE","uuid":"t3","title":"L3","parent_uuid":"t2"}),
+            json!({"type":"DOC","uuid":"d1","title":"Doc","parent_uuid":"t3","url":"doc"}),
+        ];
+        let plan = build_export_plan(&toc);
+        assert_eq!(plan[0].dir_segments, vec!["L1", "L2", "L3"]);
+    }
+
+    #[test]
+    fn five_level_with_doc_parent() {
+        let toc = vec![
+            json!({"type":"TITLE","uuid":"t1","title":"日报目录","parent_uuid":null}),
+            json!({"type":"TITLE","uuid":"t2","title":"2024","parent_uuid":"t1"}),
+            json!({"type":"DOC","uuid":"d1","title":"01-01","parent_uuid":"t2","slug":"day-0101"}),
+            json!({"type":"DOC","uuid":"d2","title":"当日总结","parent_uuid":"d1","url":"summary-0101"}),
+        ];
+        let plan = build_export_plan(&toc);
+        assert_eq!(plan.len(), 2);
+        let summary = plan.iter().find(|d| d.slug == "summary-0101").unwrap();
+        assert_eq!(
+            summary.dir_segments,
+            vec!["日报目录", "2024", "01-01"]
+        );
+    }
+
+    #[test]
+    fn doc_slug_from_slug_field_not_url() {
+        let toc = vec![
+            json!({"type":"DOC","uuid":"d1","title":"深层文档","parent_uuid":null,"slug":"deep-doc"}),
+        ];
+        let plan = build_export_plan(&toc);
+        assert_eq!(plan.len(), 1);
+        assert_eq!(plan[0].slug, "deep-doc");
+    }
+
+    #[test]
+    fn repair_parent_from_child_uuid_chain() {
+        let toc = vec![
+            json!({"type":"TITLE","uuid":"t1","title":"根","child_uuid":"d1"}),
+            json!({"type":"DOC","uuid":"d1","title":"子文档","slug":"child","sibling_uuid":"d2"}),
+            json!({"type":"DOC","uuid":"d2","title":"兄弟文档","slug":"sibling"}),
+        ];
+        let plan = build_export_plan(&toc);
+        assert_eq!(plan.len(), 2);
+        let sibling = plan.iter().find(|d| d.slug == "sibling").unwrap();
+        assert_eq!(sibling.dir_segments, vec!["根"]);
+    }
+
+    #[test]
+    fn spreadsheet_doc_type_detection() {
+        assert!(is_spreadsheet_doc_type("Sheet"));
+        assert!(is_spreadsheet_doc_type("TABLE"));
+        assert!(!is_spreadsheet_doc_type("Doc"));
+        assert_eq!(doc_type_label("Sheet"), "表格");
+    }
 }

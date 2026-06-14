@@ -78,6 +78,26 @@ const delayMode = ref<'none' | 'fixed' | 'random'>('random');
 const delayFixedSec = ref(5);
 const delayMinSec = ref(3);
 const delayMaxSec = ref(30);
+const batchLimitEnabled = ref(false);
+const batchLimitCount = ref(10);
+const autoRoundEnabled = ref(false);
+const autoRoundCount = ref(5);
+const longDelayMinMin = ref(5);
+const longDelayMaxMin = ref(60);
+const autoRoundActive = ref(false);
+const autoRoundPhase = ref<'exporting' | 'waiting' | 'paused' | null>(null);
+const currentRound = ref(0);
+const longDelayRemainingSec = ref(0);
+const autoRoundStopRequested = ref(false);
+const longDelaySkipRequested = ref(false);
+const userExportPaused = ref(false);
+const autoRoundSessionPending = ref(false);
+const autoRoundPendingWait = ref(false);
+const autoRoundNextRound = ref(1);
+let longDelayTimer: ReturnType<typeof setInterval> | null = null;
+let longDelayWaitResolve: ((action: 'continue' | 'skip' | 'stop' | 'paused') => void) | null = null;
+const uiCountdownTick = ref(0);
+let uiCountdownTimer: ReturnType<typeof setInterval> | null = null;
 const loading = ref(false);
 const preview = ref<{ title: string; preview: string; imageCount: number; charCount: number } | null>(null);
 const bookPreview = ref<{ bookName: string; total: number; docs: { title: string; slug: string; dirPath: string }[] } | null>(null);
@@ -112,9 +132,209 @@ const exportProgress = ref<{
 
 const exportLabel = computed(() => {
   if (!batchMode.value) return '开始导出';
+  if (autoRoundPhase.value === 'waiting') return '等待下一轮…';
+  if (autoRoundPhase.value === 'paused' && autoRoundPendingWait.value) return '继续导出';
+  if (batchExportRunning.value) {
+    if (autoRoundActive.value) return `导出中 · 第 ${currentRound.value}/${autoRoundCount.value} 轮`;
+    return '导出中…';
+  }
+  if (autoRoundSessionPending.value && autoRoundEnabled.value) return '继续导出';
   if (exportProgress.value && resumeExport.value) return '继续导出';
-  return '批量导出知识库';
+  return autoRoundEnabled.value ? '开始自动多轮' : '开始批量导出';
 });
+
+const exportStrategy = computed({
+  get(): 'continuous' | 'batch_pause' | 'auto_round' {
+    if (autoRoundEnabled.value) return 'auto_round';
+    if (batchLimitEnabled.value) return 'batch_pause';
+    return 'continuous';
+  },
+  set(v: 'continuous' | 'batch_pause' | 'auto_round') {
+    autoRoundEnabled.value = v === 'auto_round';
+    batchLimitEnabled.value = v === 'batch_pause';
+  },
+});
+
+const delayModeHint = computed(() => {
+  if (delayMode.value === 'none') return '未设置篇间间隔（易触发限流）';
+  if (delayMode.value === 'fixed') return `每篇固定等待 ${delayFixedSec.value} 秒`;
+  return `每篇随机 ${delayMinSec.value}~${delayMaxSec.value} 秒`;
+});
+
+interface ExportStatusHub {
+  phaseLabel: string;
+  phaseTag: 'exporting' | 'waiting' | 'paused';
+  title: string;
+  countdownSec: number;
+  countdownLabel: string | null;
+  detail: string | null;
+  paused: boolean;
+  showPause: boolean;
+  showSkip: boolean;
+  showStop: boolean;
+  hint: string | null;
+}
+
+const exportStatusHub = computed((): ExportStatusHub | null => {
+  void uiCountdownTick.value;
+
+  if (autoRoundPhase.value === 'waiting') {
+    return {
+      phaseLabel: '轮间等待',
+      phaseTag: 'waiting',
+      title: `第 ${currentRound.value} / ${autoRoundCount.value} 轮已完成`,
+      countdownSec: longDelayRemainingSec.value,
+      countdownLabel: '距离下一轮',
+      detail: `轮间随机 ${longDelayMinMin.value}~${longDelayMaxMin.value} 分钟`,
+      paused: false,
+      showPause: true,
+      showSkip: true,
+      showStop: true,
+      hint: '程序在运行，请勿关闭窗口',
+    };
+  }
+
+  if (autoRoundPhase.value === 'paused' && autoRoundPendingWait.value) {
+    return {
+      phaseLabel: '已暂停',
+      phaseTag: 'paused',
+      title: `轮间等待已暂停（第 ${currentRound.value} / ${autoRoundCount.value} 轮）`,
+      countdownSec: longDelayRemainingSec.value,
+      countdownLabel: '暂停前剩余',
+      detail: '继续后将重新随机倒计时',
+      paused: true,
+      showPause: false,
+      showSkip: false,
+      showStop: false,
+      hint: null,
+    };
+  }
+
+  if (autoRoundSessionPending.value && autoRoundPhase.value === 'paused') {
+    return {
+      phaseLabel: '已暂停',
+      phaseTag: 'paused',
+      title: `第 ${autoRoundNextRound.value} / ${autoRoundCount.value} 轮导出已暂停`,
+      countdownSec: 0,
+      countdownLabel: null,
+      detail: '点「继续导出」继续当前轮次',
+      paused: true,
+      showPause: false,
+      showSkip: false,
+      showStop: false,
+      hint: null,
+    };
+  }
+
+  if (batchExportRunning.value && docDelayRemainingSec.value > 0) {
+    const roundPrefix = autoRoundActive.value
+      ? `第 ${currentRound.value}/${autoRoundCount.value} 轮 · `
+      : '';
+    return {
+      phaseLabel: '篇间等待',
+      phaseTag: 'waiting',
+      title: `${roundPrefix}等待导出下一篇`,
+      countdownSec: docDelayRemainingSec.value,
+      countdownLabel: '篇间间隔',
+      detail: delayModeHint.value,
+      paused: false,
+      showPause: true,
+      showSkip: false,
+      showStop: autoRoundActive.value,
+      hint: '程序在运行，请勿关闭窗口',
+    };
+  }
+
+  if (batchExportRunning.value) {
+    const exporting = progressStats.value.exporting;
+    const roundPrefix = autoRoundActive.value
+      ? `第 ${currentRound.value}/${autoRoundCount.value} 轮 · `
+      : '';
+    return {
+      phaseLabel: '导出中',
+      phaseTag: 'exporting',
+      title: exporting
+        ? `${roundPrefix}正在下载：${exporting.title}`
+        : `${roundPrefix}批量导出进行中`,
+      countdownSec: 0,
+      countdownLabel: null,
+      detail: `${progressStats.value.done + progressStats.value.duplicate}/${progressStats.value.total} 篇已处理`,
+      paused: false,
+      showPause: true,
+      showSkip: false,
+      showStop: autoRoundActive.value,
+      hint: '暂停将在当前篇下载完成后生效',
+    };
+  }
+
+  if (exportPaused.value && !autoRoundSessionPending.value) {
+    return {
+      phaseLabel: '已暂停',
+      phaseTag: 'paused',
+      title: batchLimitEnabled.value
+        ? `本批已暂停，可继续导出最多 ${batchLimitCount.value} 篇`
+        : '导出已暂停',
+      countdownSec: 0,
+      countdownLabel: null,
+      detail: '可修改设置后点「继续导出」',
+      paused: true,
+      showPause: false,
+      showSkip: false,
+      showStop: false,
+      hint: null,
+    };
+  }
+
+  return null;
+});
+
+const exportSettingsLocked = computed(
+  () =>
+    batchMode.value
+    && (batchExportRunning.value || autoRoundPhase.value === 'waiting')
+    && !userExportPaused.value
+    && autoRoundPhase.value !== 'paused',
+);
+
+function formatCountdownSec(totalSec: number): string {
+  const sec = Math.max(0, Math.ceil(totalSec));
+  if (sec <= 0) return '0 秒';
+  const h = Math.floor(sec / 3600);
+  const m = Math.floor((sec % 3600) / 60);
+  const s = sec % 60;
+  if (h > 0) return `${h} 时 ${m} 分 ${String(s).padStart(2, '0')} 秒`;
+  if (m > 0) return `${m} 分 ${String(s).padStart(2, '0')} 秒`;
+  return `${s} 秒`;
+}
+
+const docDelayRemainingSec = computed(() => {
+  void uiCountdownTick.value;
+  const until = progressDetail.value?.delayUntil;
+  if (!until) return 0;
+  return Math.max(0, Math.ceil((new Date(until).getTime() - Date.now()) / 1000));
+});
+
+function syncUiCountdownTimer() {
+  const longDelayActive =
+    autoRoundPhase.value === 'waiting'
+    || (autoRoundPhase.value === 'paused' && autoRoundPendingWait.value);
+  const docDelayActive = batchExportRunning.value && !!progressDetail.value?.delayUntil;
+  const need = longDelayActive || docDelayActive;
+  if (need && !uiCountdownTimer) {
+    uiCountdownTimer = setInterval(() => {
+      uiCountdownTick.value += 1;
+    }, 1000);
+  } else if (!need && uiCountdownTimer) {
+    clearInterval(uiCountdownTimer);
+    uiCountdownTimer = null;
+  }
+}
+
+watch(
+  [batchExportRunning, autoRoundPhase, autoRoundPendingWait, () => progressDetail.value?.delayUntil],
+  syncUiCountdownTimer,
+  { immediate: true },
+);
 
 const docProgressList = computed(() => mergeDocProgress(bookCatalog.value, progressDetail.value));
 
@@ -132,17 +352,21 @@ const progressStats = computed(() => {
     ? list.filter((d) => d.status === 'done').length
     : (progressDetail.value?.completed ?? 0);
   const failed = list.filter((d) => d.status === 'failed').length;
+  const duplicate = list.filter((d) => d.status === 'duplicate').length;
   const exporting = list.find((d) => d.status === 'exporting');
   return {
     total,
     done,
     failed,
-    remaining: Math.max(0, total - done),
+    duplicate,
+    remaining: Math.max(0, total - done - duplicate),
     exporting,
   };
 });
 
-const progressBarText = computed(() => formatProgressBar(progressStats.value.done, progressStats.value.total));
+const progressBarText = computed(() =>
+  formatProgressBar(progressStats.value.done + progressStats.value.duplicate, progressStats.value.total),
+);
 
 const showProgressPanel = computed(() => batchMode.value && docProgressList.value.length > 0);
 
@@ -155,7 +379,12 @@ const hasExportProgress = computed(
 );
 
 const exportPaused = computed(
-  () => progressDetail.value?.status === 'paused' || pauseRequested.value,
+  () =>
+    progressDetail.value?.status === 'paused'
+    || pauseRequested.value
+    || userExportPaused.value
+    || autoRoundPhase.value === 'paused'
+    || autoRoundSessionPending.value,
 );
 
 const progressBookName = computed(
@@ -255,6 +484,25 @@ function loadYuqueSettings() {
       exportHtml.value = true;
     }
   }
+
+  const savedBatchLimitEnabled = localStorage.getItem('yuque-batch-limit-enabled');
+  if (savedBatchLimitEnabled === '1') batchLimitEnabled.value = true;
+  else if (savedBatchLimitEnabled === '0') batchLimitEnabled.value = false;
+
+  const savedBatchLimitCount = Number(localStorage.getItem('yuque-batch-limit-count'));
+  if (Number.isFinite(savedBatchLimitCount) && savedBatchLimitCount >= 1) {
+    batchLimitCount.value = Math.floor(savedBatchLimitCount);
+  }
+
+  if (localStorage.getItem('yuque-auto-round-enabled') === '1') autoRoundEnabled.value = true;
+  const savedAutoRoundCount = Number(localStorage.getItem('yuque-auto-round-count'));
+  if (Number.isFinite(savedAutoRoundCount) && savedAutoRoundCount >= 1) {
+    autoRoundCount.value = Math.floor(savedAutoRoundCount);
+  }
+  const savedLongMin = Number(localStorage.getItem('yuque-long-delay-min'));
+  if (Number.isFinite(savedLongMin) && savedLongMin >= 1) longDelayMinMin.value = Math.floor(savedLongMin);
+  const savedLongMax = Number(localStorage.getItem('yuque-long-delay-max'));
+  if (Number.isFinite(savedLongMax) && savedLongMax >= 1) longDelayMaxMin.value = Math.floor(savedLongMax);
 }
 
 function persistYuqueSettings() {
@@ -282,6 +530,12 @@ function persistYuqueSettings() {
   localStorage.setItem('yuque-export-order', exportOrder.value);
   localStorage.setItem('yuque-export-md', exportMd.value ? '1' : '0');
   localStorage.setItem('yuque-export-html', exportHtml.value ? '1' : '0');
+  localStorage.setItem('yuque-batch-limit-enabled', batchLimitEnabled.value ? '1' : '0');
+  localStorage.setItem('yuque-batch-limit-count', String(batchLimitCount.value));
+  localStorage.setItem('yuque-auto-round-enabled', autoRoundEnabled.value ? '1' : '0');
+  localStorage.setItem('yuque-auto-round-count', String(autoRoundCount.value));
+  localStorage.setItem('yuque-long-delay-min', String(longDelayMinMin.value));
+  localStorage.setItem('yuque-long-delay-max', String(longDelayMaxMin.value));
 }
 
 onMounted(async () => {
@@ -294,6 +548,11 @@ onMounted(async () => {
 
 onUnmounted(() => {
   stopProgressPolling();
+  stopLongDelayTimer();
+  if (uiCountdownTimer) {
+    clearInterval(uiCountdownTimer);
+    uiCountdownTimer = null;
+  }
 });
 
 function startProgressPolling() {
@@ -500,6 +759,12 @@ watch(
     resumeExport,
     stopOnError,
     exportOrder,
+    batchLimitEnabled,
+    batchLimitCount,
+    autoRoundEnabled,
+    autoRoundCount,
+    longDelayMinMin,
+    longDelayMaxMin,
   ],
   () => persistYuqueSettings(),
 );
@@ -562,6 +827,21 @@ function handleClearYuque() {
   pauseRequested.value = false;
   exportOrder.value = 'top-down';
   selectedSlugs.value = [];
+  autoRoundEnabled.value = false;
+  autoRoundCount.value = 5;
+  longDelayMinMin.value = 5;
+  longDelayMaxMin.value = 60;
+  autoRoundActive.value = false;
+  autoRoundPhase.value = null;
+  currentRound.value = 0;
+  longDelayRemainingSec.value = 0;
+  autoRoundStopRequested.value = false;
+  userExportPaused.value = false;
+  autoRoundSessionPending.value = false;
+  autoRoundPendingWait.value = false;
+  autoRoundNextRound.value = 1;
+  stopLongDelayTimer();
+  longDelayWaitResolve = null;
   stopProgressPolling();
 }
 
@@ -569,12 +849,33 @@ async function handlePauseExport() {
   const url = shareUrl.value.trim();
   const dir = saveDir.value.trim();
   if (!url || !dir) return;
+
+  if (autoRoundPhase.value === 'waiting') {
+    userExportPaused.value = true;
+    pauseLongDelayCountdown();
+    autoRoundPhase.value = 'paused';
+    autoRoundSessionPending.value = true;
+    autoRoundPendingWait.value = true;
+    autoRoundNextRound.value = currentRound.value + 1;
+    resolveLongDelayWait('paused');
+    batchExportRunning.value = false;
+    stopProgressPolling();
+    ElMessage.info('倒计时已暂停，点「继续导出」将从头开始等待');
+    return;
+  }
+
+  userExportPaused.value = true;
   pauseRequested.value = true;
   try {
     await cancelYuqueExport(url, dir);
-    ElMessage.info('正在暂停，将在当前篇下载完成后停止…');
+    ElMessage.info(
+      autoRoundActive.value
+        ? '正在暂停自动多轮，将在当前篇完成后停止…'
+        : '正在暂停，将在当前篇下载完成后停止…',
+    );
   } catch (err: any) {
     pauseRequested.value = false;
+    userExportPaused.value = false;
     ElMessage.error(err.message || '暂停失败');
   }
 }
@@ -742,7 +1043,324 @@ async function confirmYuqueDisclaimer(): Promise<boolean> {
   }
 }
 
+function stopLongDelayTimer() {
+  if (longDelayTimer) {
+    clearInterval(longDelayTimer);
+    longDelayTimer = null;
+  }
+}
+
+function pauseLongDelayCountdown() {
+  stopLongDelayTimer();
+}
+
+function resolveLongDelayWait(action: 'continue' | 'skip' | 'stop' | 'paused') {
+  if (longDelayWaitResolve) {
+    longDelayWaitResolve(action);
+    longDelayWaitResolve = null;
+  }
+}
+
+function randomLongDelaySec(minMin: number, maxMin: number): number {
+  const min = Math.min(minMin, maxMin);
+  const max = Math.max(minMin, maxMin);
+  if (max <= min) return min * 60;
+  return Math.floor(min * 60 + Math.random() * (max - min) * 60);
+}
+
+/** @param freshStart true=重新随机倒计时；false=沿用当前剩余秒数（暂停冻结后恢复用，继续导出时传 true） */
+function waitBetweenAutoRounds(freshStart = true): Promise<'continue' | 'skip' | 'stop' | 'paused'> {
+  if (freshStart) {
+    longDelayRemainingSec.value = randomLongDelaySec(longDelayMinMin.value, longDelayMaxMin.value);
+  }
+  autoRoundPhase.value = 'waiting';
+  longDelaySkipRequested.value = false;
+  userExportPaused.value = false;
+
+  return new Promise((resolve) => {
+    longDelayWaitResolve = resolve;
+    stopLongDelayTimer();
+    longDelayTimer = setInterval(() => {
+      if (userExportPaused.value) {
+        pauseLongDelayCountdown();
+        autoRoundPhase.value = 'paused';
+        return;
+      }
+      if (autoRoundStopRequested.value) {
+        stopLongDelayTimer();
+        autoRoundPhase.value = null;
+        longDelayRemainingSec.value = 0;
+        resolveLongDelayWait('stop');
+        return;
+      }
+      if (longDelaySkipRequested.value) {
+        stopLongDelayTimer();
+        autoRoundPhase.value = null;
+        longDelayRemainingSec.value = 0;
+        resolveLongDelayWait('skip');
+        return;
+      }
+      longDelayRemainingSec.value = Math.max(0, longDelayRemainingSec.value - 1);
+      if (longDelayRemainingSec.value <= 0) {
+        stopLongDelayTimer();
+        autoRoundPhase.value = null;
+        resolveLongDelayWait('continue');
+      }
+    }, 1000);
+  });
+}
+
+function skipLongDelayWait() {
+  longDelaySkipRequested.value = true;
+}
+
+function stopAutoRound() {
+  autoRoundStopRequested.value = true;
+  userExportPaused.value = false;
+  resolveLongDelayWait('stop');
+  stopLongDelayTimer();
+  autoRoundPhase.value = null;
+  longDelayRemainingSec.value = 0;
+  autoRoundSessionPending.value = false;
+  autoRoundPendingWait.value = false;
+}
+
+function validateBatchExportOptions(): string | null {
+  if (exportOrder.value === 'custom' && !selectedSlugs.value.length) {
+    return '自定义导出请至少勾选一篇文档';
+  }
+  const useBatchLimit = batchLimitEnabled.value || autoRoundEnabled.value;
+  if (useBatchLimit) {
+    const limit = Math.floor(batchLimitCount.value);
+    if (!Number.isFinite(limit) || limit < 1) {
+      return '请填写每轮/每批导出篇数（至少 1 篇）';
+    }
+    if (!resumeExport.value) {
+      return '分批或自动多轮导出需勾选「继续上次导出」';
+    }
+  }
+  if (autoRoundEnabled.value) {
+    const rounds = Math.floor(autoRoundCount.value);
+    if (!Number.isFinite(rounds) || rounds < 1) {
+      return '请填写自动多轮次数（至少 1 轮）';
+    }
+    const minM = Math.floor(longDelayMinMin.value);
+    const maxM = Math.floor(longDelayMaxMin.value);
+    if (!Number.isFinite(minM) || minM < 1 || !Number.isFinite(maxM) || maxM < 1) {
+      return '请填写轮间等待时间（至少 1 分钟）';
+    }
+  }
+  return null;
+}
+
+async function executeBatchExport(exportFormat: YuqueExportFormat) {
+  const url = shareUrl.value.trim();
+  const token = authMode.value === 'token' ? yuqueToken.value.trim() : '';
+  const useBatchLimit = batchLimitEnabled.value || autoRoundEnabled.value;
+  return exportYuqueBatch({
+    url,
+    saveDir: saveDir.value,
+    token: token || undefined,
+    resume: resumeExport.value,
+    downloadImages: downloadImages.value,
+    standardMarkdown: standardMarkdown.value,
+    exportFormat,
+    delayMode: delayMode.value,
+    delayFixedSec: delayFixedSec.value,
+    delayMinSec: delayMinSec.value,
+    delayMaxSec: delayMaxSec.value,
+    useDocFolder: useDocFolder.value,
+    stopOnError: stopOnError.value,
+    exportOrder: exportOrder.value,
+    selectedSlugs: exportOrder.value === 'custom' ? selectedSlugs.value : undefined,
+    batchLimit: useBatchLimit ? Math.floor(batchLimitCount.value) : undefined,
+  });
+}
+
+function storeBatchResult(result: Awaited<ReturnType<typeof exportYuqueBatch>>) {
+  batchResult.value = {
+    exported: result.exported,
+    total: result.total,
+    newlyExported: result.newlyExported,
+    skippedCount: result.skippedCount,
+    remainingCount: result.remainingCount,
+    failedCount: result.failedCount,
+    bookDir: result.bookDir,
+    resume: result.resume,
+  };
+  lastResult.value = { filePath: result.bookDir, fileName: result.bookName, bookDir: result.bookDir };
+}
+
+function notifyBatchExportResult(
+  result: Awaited<ReturnType<typeof exportYuqueBatch>>,
+  exportFormat: YuqueExportFormat,
+  opts?: { autoRound?: boolean; round?: number; totalRounds?: number; finalRound?: boolean },
+) {
+  if (opts?.autoRound && !opts.finalRound && result.batchLimitReached) {
+    notifyYuque(
+      'info',
+      `第 ${opts.round}/${opts.totalRounds} 轮完成，本轮 ${result.newlyExported} 篇，累计 ${result.exported}/${result.total}，即将等待后继续…`,
+      { toast: true },
+    );
+    return;
+  }
+  if (result.batchLimitReached) {
+    notifyYuque(
+      'success',
+      `本批已导出 ${result.newlyExported} 篇（达到上限 ${Math.floor(batchLimitCount.value)} 篇），累计 ${result.exported}/${result.total}。请检查文件，确认无误后点「继续导出」再导下一批。`,
+    );
+  } else if (result.paused) {
+    ElMessage.success({
+      message: `已暂停（已完成 ${result.exported}/${result.total}）。可修改选项后点「继续导出」。`,
+      duration: 8000,
+    });
+  } else if (result.stoppedEarly) {
+    ElMessage.warning({
+      message: `导出因错误已暂停（已完成 ${result.exported}/${result.total}）。进度已保存，几小时后用相同链接和目录点「继续导出」即可从失败处重试。`,
+      duration: 12000,
+      showClose: true,
+    });
+  } else if (result.remainingCount > 0) {
+    ElMessage.warning(
+      `本次新导出 ${result.newlyExported} 篇，跳过 ${result.skippedCount} 篇；` +
+      `累计 ${result.exported}/${result.total}，还剩 ${result.remainingCount} 篇`,
+    );
+  } else if (result.failedCount) {
+    ElMessage.warning(`全部完成 ${result.exported}/${result.total}，${result.failedCount} 篇失败可再次继续导出重试`);
+  } else if (result.resume && result.skippedCount) {
+    ElMessage.success(`续导完成：新导出 ${result.newlyExported} 篇，共 ${result.exported}/${result.total} 篇`);
+  } else {
+    ElMessage.success(`已批量导出 ${result.exported} 篇（${exportFormatLabel(exportFormat)}）到「${result.bookName}」`);
+  }
+}
+
+async function runAutoRoundExport(exportFormat: YuqueExportFormat, startRound = 1) {
+  const totalRounds = Math.floor(autoRoundCount.value);
+  autoRoundActive.value = true;
+  autoRoundStopRequested.value = false;
+  if (startRound === 1 && !autoRoundSessionPending.value) {
+    pauseRequested.value = false;
+    userExportPaused.value = false;
+  }
+
+  for (let round = startRound; round <= totalRounds; round++) {
+    if (autoRoundStopRequested.value) break;
+
+    currentRound.value = round;
+    autoRoundPhase.value = 'exporting';
+
+    const result = await executeBatchExport(exportFormat);
+    storeBatchResult(result);
+    persistDelaySettings();
+    persistAuthSettings();
+    await refreshProgressDetail();
+    pauseRequested.value = false;
+
+    const isLastRound = round >= totalRounds;
+    const allDone = result.remainingCount <= 0;
+
+    if (autoRoundStopRequested.value || result.stoppedEarly) {
+      notifyYuque('info', `自动多轮已停止（第 ${round}/${totalRounds} 轮），还剩 ${result.remainingCount} 篇`);
+      break;
+    }
+    if (result.paused && !result.batchLimitReached) {
+      autoRoundSessionPending.value = true;
+      autoRoundPendingWait.value = false;
+      autoRoundNextRound.value = round;
+      userExportPaused.value = true;
+      autoRoundPhase.value = 'paused';
+      notifyYuque(
+        'info',
+        `第 ${round}/${totalRounds} 轮已暂停，点「继续导出」继续；若进入轮间等待将重新倒计时`,
+      );
+      break;
+    }
+    if (allDone) {
+      notifyYuque('success', `自动多轮完成：全部 ${result.total} 篇已处理（共 ${round} 轮）`);
+      break;
+    }
+    if (isLastRound) {
+      notifyYuque(
+        'success',
+        `已完成 ${totalRounds} 轮，累计 ${result.exported}/${result.total}，还剩 ${result.remainingCount} 篇。可再点「继续导出」。`,
+      );
+      break;
+    }
+
+    notifyBatchExportResult(result, exportFormat, { autoRound: true, round, totalRounds, finalRound: false });
+
+    const waitAction = await waitBetweenAutoRounds(true);
+    if (waitAction === 'paused') {
+      autoRoundSessionPending.value = true;
+      autoRoundPendingWait.value = true;
+      autoRoundNextRound.value = round + 1;
+      notifyYuque(
+        'info',
+        `轮间等待已暂停（第 ${round}/${totalRounds} 轮已完成），点「继续导出」将从头开始倒计时`,
+      );
+      break;
+    }
+    if (waitAction === 'stop') {
+      notifyYuque('info', `已停止自动多轮（第 ${round}/${totalRounds} 轮后），还剩 ${result.remainingCount} 篇`);
+      break;
+    }
+  }
+
+  if (!autoRoundSessionPending.value) {
+    finishAutoRoundSession();
+  }
+}
+
+function finishAutoRoundSession() {
+  autoRoundActive.value = false;
+  autoRoundPhase.value = null;
+  currentRound.value = 0;
+  longDelayRemainingSec.value = 0;
+  autoRoundStopRequested.value = false;
+  autoRoundSessionPending.value = false;
+  autoRoundPendingWait.value = false;
+  userExportPaused.value = false;
+  pauseRequested.value = false;
+}
+
+async function resumeAutoRoundSession(exportFormat: YuqueExportFormat) {
+  const totalRounds = Math.floor(autoRoundCount.value);
+  const startRound = autoRoundNextRound.value;
+  const needWaitFirst = autoRoundPendingWait.value;
+
+  userExportPaused.value = false;
+  pauseRequested.value = false;
+  autoRoundStopRequested.value = false;
+  autoRoundSessionPending.value = false;
+  autoRoundPendingWait.value = false;
+  batchExportRunning.value = true;
+  autoRoundActive.value = true;
+  startProgressPolling();
+
+  if (needWaitFirst && startRound <= totalRounds) {
+    const waitAction = await waitBetweenAutoRounds(true);
+    if (waitAction === 'paused') {
+      autoRoundSessionPending.value = true;
+      autoRoundPendingWait.value = true;
+      autoRoundNextRound.value = startRound;
+      batchExportRunning.value = false;
+      stopProgressPolling();
+      return;
+    }
+    if (waitAction === 'stop') {
+      notifyYuque('info', '自动多轮已停止');
+      batchExportRunning.value = false;
+      stopProgressPolling();
+      finishAutoRoundSession();
+      return;
+    }
+  }
+
+  await runAutoRoundExport(exportFormat, startRound);
+}
+
 async function handleExport() {
+  if (batchMode.value && batchExportRunning.value && !autoRoundSessionPending.value) return;
   const url = shareUrl.value.trim();
   if (!url) return ElMessage.warning('请粘贴语雀分享链接');
   if (!saveDir.value) return ElMessage.warning('请先选择保存目录');
@@ -786,61 +1404,31 @@ async function handleExport() {
         batchExportRunning.value = false;
         return;
       }
-      const result = await exportYuqueBatch({
-        url,
-        saveDir: saveDir.value,
-        token: token || undefined,
-        resume: resumeExport.value,
-        downloadImages: downloadImages.value,
-        standardMarkdown: standardMarkdown.value,
-        exportFormat,
-        delayMode: delayMode.value,
-        delayFixedSec: delayFixedSec.value,
-        delayMinSec: delayMinSec.value,
-        delayMaxSec: delayMaxSec.value,
-        useDocFolder: useDocFolder.value,
-        stopOnError: stopOnError.value,
-        exportOrder: exportOrder.value,
-        selectedSlugs: exportOrder.value === 'custom' ? selectedSlugs.value : undefined,
-      });
+      const validationError = validateBatchExportOptions();
+      if (validationError) {
+        notifyYuque('warning', validationError);
+        stopProgressPolling();
+        batchExportRunning.value = false;
+        return;
+      }
+
+      if (autoRoundEnabled.value) {
+        if (autoRoundSessionPending.value) {
+          await resumeAutoRoundSession(exportFormat);
+        } else {
+          autoRoundNextRound.value = 1;
+          await runAutoRoundExport(exportFormat);
+        }
+        return;
+      }
+
+      const result = await executeBatchExport(exportFormat);
       persistDelaySettings();
       persistAuthSettings();
-      batchResult.value = {
-        exported: result.exported,
-        total: result.total,
-        newlyExported: result.newlyExported,
-        skippedCount: result.skippedCount,
-        remainingCount: result.remainingCount,
-        failedCount: result.failedCount,
-        bookDir: result.bookDir,
-        resume: result.resume,
-      };
-      lastResult.value = { filePath: result.bookDir, fileName: result.bookName, bookDir: result.bookDir };
+      storeBatchResult(result);
       await refreshProgressDetail();
       pauseRequested.value = false;
-      if (result.paused) {
-        ElMessage.success({
-          message: `已暂停（已完成 ${result.exported}/${result.total}）。可修改选项后点「继续导出」。`,
-          duration: 8000,
-        });
-      } else if (result.stoppedEarly) {
-        ElMessage.warning({
-          message: `导出因错误已暂停（已完成 ${result.exported}/${result.total}）。进度已保存，几小时后用相同链接和目录点「继续导出」即可从失败处重试。`,
-          duration: 12000,
-          showClose: true,
-        });
-      } else if (result.remainingCount > 0) {
-        ElMessage.warning(
-          `本次新导出 ${result.newlyExported} 篇，跳过 ${result.skippedCount} 篇；` +
-          `累计 ${result.exported}/${result.total}，还剩 ${result.remainingCount} 篇`,
-        );
-      } else if (result.failedCount) {
-        ElMessage.warning(`全部完成 ${result.exported}/${result.total}，${result.failedCount} 篇失败可再次继续导出重试`);
-      } else if (result.resume && result.skippedCount) {
-        ElMessage.success(`续导完成：新导出 ${result.newlyExported} 篇，共 ${result.exported}/${result.total} 篇`);
-      } else {
-        ElMessage.success(`已批量导出 ${result.exported} 篇（${exportFormatLabel(exportFormat)}）到「${result.bookName}」`);
-      }
+      notifyBatchExportResult(result, exportFormat);
     } else {
       const result = await exportYuque({
         url,
@@ -912,183 +1500,77 @@ async function handleExport() {
       </p>
     </div>
 
-    <div v-if="batchMode" class="field export-mode-card">
-      <label class="section-title">认证方式（批量导出）</label>
-      <el-radio-group v-model="authMode" class="mode-group">
-        <el-radio value="token">API Token（推荐）</el-radio>
-        <el-radio value="share">分享链接（无需 Token）</el-radio>
-      </el-radio-group>
-      <div v-if="authMode === 'token'" class="token-block">
-        <el-input
-          v-model="yuqueToken"
-          type="password"
-          show-password
-          placeholder="语雀个人 Token"
-        />
-        <p class="mode-tip">
-          在语雀头像 → 设置 → Token 中创建：
-          <a href="https://www.yuque.com/settings/tokens" target="_blank" rel="noopener">yuque.com/settings/tokens</a>。
-          链接可填知识库地址，如 <code>yuque.com/your-name/your-repo</code>。
-        </p>
-      </div>
-      <p v-else class="mode-tip">
-        需粘贴知识库内<strong>任意一篇文档</strong>的分享链接，格式：
-        <code>yuque.com/用户/知识库/文档slug?singleDoc</code>
-      </p>
-    </div>
-
-    <div class="field">
-      <div class="label-row">
-        <label>{{ batchMode && authMode === 'token' ? '语雀知识库链接' : '语雀分享链接' }}</label>
-        <el-button v-if="shareUrl" link type="danger" @click="clearShareUrl">清空</el-button>
-      </div>
-      <FavoriteUrlInput
-        v-model="shareUrl"
-        :placeholder="batchMode && authMode === 'token'
-          ? 'https://www.yuque.com/your-name/your-repo'
-          : 'https://www.yuque.com/用户/知识库/任意文档?singleDoc'"
-      />
-    </div>
-
-    <div class="field row">
-      <div class="grow">
-        <label>保存目录</label>
-        <FavoritePathInput v-model="saveDir" placeholder="选择或输入保存位置" />
-      </div>
-      <el-button v-if="saveDir" @click="openFolder(saveDir)">在 Finder 打开</el-button>
-    </div>
-
-    <div class="field export-mode-card">
-      <label class="section-title">导出模式与下载间隔</label>
-      <el-radio-group v-model="exportMode" class="mode-group">
-        <el-radio value="single">单篇导出</el-radio>
-        <el-radio value="batch">批量导出整个知识库</el-radio>
-      </el-radio-group>
-
-      <div class="batch-delay" :class="{ disabled: !batchMode }">
-        <p v-if="!batchMode" class="mode-tip">切换到「批量导出」后可设置每篇之间的下载间隔。</p>
-        <template v-else>
-          <p class="sub-label">下载间隔（降低被限流风险）</p>
-          <el-radio-group v-model="delayMode">
-            <el-radio value="none">无间隔（最快，不推荐）</el-radio>
-            <el-radio value="fixed">固定间隔</el-radio>
-            <el-radio value="random">随机间隔（推荐）</el-radio>
-          </el-radio-group>
-          <div v-if="delayMode === 'fixed'" class="delay-inputs">
-            <span>每篇完成后等待</span>
-            <el-input-number v-model="delayFixedSec" :min="1" :max="120" :step="1" />
-            <span>秒</span>
-          </div>
-          <div v-else-if="delayMode === 'random'" class="delay-inputs">
-            <span>每篇完成后随机等待</span>
-            <el-input-number v-model="delayMinSec" :min="1" :max="120" :step="1" />
-            <span>~</span>
-            <el-input-number v-model="delayMaxSec" :min="1" :max="120" :step="1" />
-            <span>秒</span>
-          </div>
-          <p class="mode-tip">
-            例如 88 篇、3~30 秒随机间隔，大约需要 4~44 分钟。间隔越长越稳妥。
-          </p>
-        </template>
-      </div>
-    </div>
-
-    <div v-if="batchMode" class="field export-mode-card">
-      <label class="section-title">断点续导</label>
-      <el-checkbox v-model="resumeExport">继续上次导出（跳过已完成的文档）</el-checkbox>
-      <el-checkbox v-model="stopOnError">遇错暂停（限流或单篇失败时停止，保存进度供稍后重试）</el-checkbox>
-      <div v-if="exportProgress && resumeExport" class="progress-card">
-        <p>
-          <strong>「{{ exportProgress.bookName }}」</strong>
-          已完成 {{ exportProgress.completed }}/{{ exportProgress.total }} 篇
-          <span v-if="exportProgress.remaining">，还剩 {{ exportProgress.remaining }} 篇</span>
-        </p>
-        <p v-if="exportProgress.failedCount" class="warn">上次有 {{ exportProgress.failedCount }} 篇失败，继续导出时会从第一篇失败处重试</p>
-        <p v-if="exportProgress.updatedAt" class="muted">进度记录于 {{ new Date(exportProgress.updatedAt).toLocaleString() }}</p>
-        <el-button v-if="exportProgress.bookDir" link type="primary" @click="openFolder(exportProgress.bookDir)">
-          打开已导出目录
+    <div class="command-strip">
+      <div class="command-primary">
+        <el-button :loading="loading && !batchExportRunning" @click="handlePreview">
+          {{ batchMode ? '预览知识库' : '预览识别' }}
+        </el-button>
+        <el-button
+          type="primary"
+          :loading="loading"
+          :disabled="batchExportRunning && !autoRoundSessionPending"
+          @click="handleExport"
+        >
+          {{ exportLabel }}
         </el-button>
       </div>
-      <p v-else class="mode-tip">
-        每完成一篇自动记录进度（应用内 + 保存目录下的 <code>.deskit-yuque-*.json</code>）。
-        用<strong>相同知识库链接和保存目录</strong>再次打开，目录树会显示 ✓ 已导出 / ✗ 失败 / ○ 待导出。
-      </p>
+      <el-button
+        v-if="batchMode && hasExportProgress && !batchExportRunning && !exportStatusHub"
+        type="danger"
+        plain
+        @click="handleRestartExport"
+      >
+        重新开始
+      </el-button>
     </div>
 
-    <div class="field image-mode">
-      <label>图片处理方式</label>
-      <el-radio-group :model-value="imageMode" @change="onImageModeChange">
-        <el-radio value="local">下载到本地 assets/（适合离线备份、本地阅读）</el-radio>
-        <el-radio value="online">保留语雀在线链接（适合再导入语雀）</el-radio>
-      </el-radio-group>
-      <p v-if="imageMode === 'local'" class="mode-tip warn">
-        Markdown 里会是 <code>![](assets/xxx.png)</code> 这类本地路径。再导入语雀时，图片<strong>不会</strong>自动上传，需手动处理或改用「保留在线链接」。
-      </p>
-      <p v-else class="mode-tip">
-        Markdown 里保留 <code>![](https://cdn.nlark.com/...)</code>。导入语雀时图片通常能正常显示（需原图链接仍可访问）。
-      </p>
-    </div>
-
-    <div class="field">
-      <el-checkbox v-model="standardMarkdown">导出为标准 Markdown（去除颜色标签、整理标题/表格/图片格式）</el-checkbox>
-    </div>
-
-    <div class="field export-mode-card">
-      <label class="section-title">导出文件格式（可多选）</label>
-      <div class="format-checks">
-        <el-checkbox v-model="exportMd">Markdown (.md)</el-checkbox>
-        <el-checkbox v-model="exportHtml">Confluence 网页 (.html)</el-checkbox>
-      </div>
-      <p class="mode-tip">
-        导入 Confluence：勾选 HTML，导出后打开同目录的 <strong>-confluence.docx</strong>（Word/WPS）→ 全选复制 → 粘贴（图片最稳）。不要用 .md 直接粘贴。
-      </p>
-      <p v-if="exportHtml && imageMode === 'online'" class="mode-tip warn">
-        保留语雀在线图片时，HTML 会尝试下载 CDN 图片内嵌；若部分失败，可改用「下载到本地 assets/」再导出。
-      </p>
-    </div>
-
-    <div class="field">
-      <el-checkbox v-model="useDocFolder">
-        {{ batchMode ? '每篇使用独立子文件夹（标题/标题.md + assets/）' : '单篇也使用独立文件夹（标题/标题.md + assets/）' }}
-      </el-checkbox>
-      <p v-if="batchMode && !useDocFolder" class="mode-tip">
-        默认按语雀目录逐篇导出，文件直接保存在对应分组目录下（如 <code>分组名/文章标题.md</code>），不会每篇单独建一层文件夹。
-      </p>
-    </div>
-
-    <div v-if="batchMode" class="field export-mode-card">
-      <label class="section-title">导出顺序</label>
-      <el-radio-group v-model="exportOrder">
-        <el-radio value="top-down">从上到下</el-radio>
-        <el-radio value="bottom-up">从下到上</el-radio>
-        <el-radio value="custom">自定义勾选</el-radio>
-      </el-radio-group>
-      <p class="mode-tip">
-        知识库为树状目录。自定义模式下勾选父级会自动选中其下所有子文档。
-      </p>
-      <div v-if="exportOrder === 'custom' && docTree.length" class="select-tree-wrap">
-        <div class="select-tree-actions">
-          <el-button link type="primary" @click="selectTreeRef?.selectAll()">全选</el-button>
-          <el-button link @click="selectTreeRef?.clearAll()">清空</el-button>
-          <span class="muted">已选 {{ selectedSlugs.length }} / {{ docProgressList.length }} 篇</span>
+    <div
+      v-if="exportStatusHub"
+      class="status-hub"
+      :class="[exportStatusHub.phaseTag, { paused: exportStatusHub.paused }]"
+    >
+      <div class="status-hub-main">
+        <div class="status-hub-text">
+          <span class="status-phase-tag">{{ exportStatusHub.phaseLabel }}</span>
+          <p class="status-title">{{ exportStatusHub.title }}</p>
+          <p v-if="exportStatusHub.detail" class="status-detail">{{ exportStatusHub.detail }}</p>
+          <p v-if="exportStatusHub.hint" class="status-hint">{{ exportStatusHub.hint }}</p>
         </div>
-        <div class="tree-scroll select-tree-scroll">
-          <YuqueExportSelectTree ref="selectTreeRef" v-model="selectedSlugs" :nodes="docTree" />
+        <div
+          v-if="exportStatusHub.countdownLabel && exportStatusHub.countdownSec > 0"
+          class="status-countdown"
+        >
+          <span class="countdown-label">{{ exportStatusHub.countdownLabel }}</span>
+          <strong class="countdown-value">{{ formatCountdownSec(exportStatusHub.countdownSec) }}</strong>
         </div>
       </div>
-      <p v-else-if="exportOrder === 'custom'" class="mode-tip">
-        请先点「预览知识库」加载目录后再勾选要导出的文档。
-      </p>
-    </div>
-
-    <div v-if="batchMode" class="field export-mode-card">
-      <label class="section-title">知识库结构快照（JSON）</label>
-      <p class="mode-tip">
-        导出 JSON 可保存目录树与各文档导出状态。重装 DeskKit 后导入 JSON 可恢复知识库结构与进度（仍需填写 Token 与保存目录）。
-      </p>
-      <div class="snapshot-actions">
-        <el-button @click="handleExportSnapshot">导出 JSON 快照</el-button>
-        <el-button @click="handleImportSnapshot">导入 JSON 快照</el-button>
+      <div
+        v-if="exportStatusHub.showPause || exportStatusHub.showSkip || exportStatusHub.showStop"
+        class="status-hub-actions"
+      >
+        <el-button
+          v-if="exportStatusHub.showPause"
+          type="warning"
+          plain
+          @click="handlePauseExport"
+        >
+          暂停
+        </el-button>
+        <el-button
+          v-if="exportStatusHub.showSkip"
+          plain
+          @click="skipLongDelayWait"
+        >
+          跳过等待
+        </el-button>
+        <el-button
+          v-if="exportStatusHub.showStop"
+          type="danger"
+          plain
+          @click="stopAutoRound"
+        >
+          停止多轮
+        </el-button>
       </div>
     </div>
 
@@ -1102,56 +1584,218 @@ async function handleExport() {
       @close="actionFeedback = null"
     />
 
-    <div class="actions">
-      <el-button :loading="loading && !batchExportRunning" @click="handlePreview">
-        {{ batchMode ? '预览知识库' : '预览识别' }}
-      </el-button>
-      <el-button type="primary" :loading="loading" :disabled="batchExportRunning" @click="handleExport">
-        {{ exportLabel }}
-      </el-button>
-      <el-button
-        v-if="batchMode && batchExportRunning"
-        type="warning"
-        plain
-        @click="handlePauseExport"
-      >
-        暂停导出
-      </el-button>
-      <el-button
-        v-if="batchMode && hasExportProgress && !batchExportRunning"
-        type="danger"
-        plain
-        @click="handleRestartExport"
-      >
-        重新开始
-      </el-button>
+    <p v-if="exportSettingsLocked" class="mode-tip lock-tip">
+      导出进行中，参数已锁定。如需修改，请先暂停导出。
+    </p>
+
+    <div class="export-settings" :class="{ locked: exportSettingsLocked }">
+      <section class="settings-section">
+        <h3 class="settings-section-title">连接与目录</h3>
+        <div class="field compact">
+          <label>导出范围</label>
+          <el-radio-group v-model="exportMode" class="mode-group">
+            <el-radio value="single">单篇</el-radio>
+            <el-radio value="batch">整个知识库</el-radio>
+          </el-radio-group>
+        </div>
+
+        <template v-if="batchMode">
+          <div class="field compact">
+            <label>认证方式</label>
+            <el-radio-group v-model="authMode" class="mode-group">
+              <el-radio value="token">API Token（推荐）</el-radio>
+              <el-radio value="share">分享链接</el-radio>
+            </el-radio-group>
+          </div>
+          <div v-if="authMode === 'token'" class="token-block">
+            <el-input
+              v-model="yuqueToken"
+              type="password"
+              show-password
+              placeholder="语雀个人 Token"
+            />
+            <p class="mode-tip">
+              在
+              <a href="https://www.yuque.com/settings/tokens" target="_blank" rel="noopener">语雀设置</a>
+              中创建 Token，链接填知识库地址即可。
+            </p>
+          </div>
+          <p v-else class="mode-tip">
+            需粘贴知识库内任意一篇文档的分享链接（含文档 slug）。
+          </p>
+        </template>
+
+        <div class="field">
+          <div class="label-row">
+            <label>{{ batchMode && authMode === 'token' ? '知识库链接' : '分享链接' }}</label>
+            <el-button v-if="shareUrl" link type="danger" @click="clearShareUrl">清空</el-button>
+          </div>
+          <FavoriteUrlInput
+            v-model="shareUrl"
+            :placeholder="batchMode && authMode === 'token'
+              ? 'https://www.yuque.com/your-name/your-repo'
+              : 'https://www.yuque.com/用户/知识库/任意文档?singleDoc'"
+          />
+        </div>
+
+        <div class="field row">
+          <div class="grow">
+            <label>保存目录</label>
+            <FavoritePathInput v-model="saveDir" placeholder="选择或输入保存位置" />
+          </div>
+          <el-button v-if="saveDir" @click="openFolder(saveDir)">打开目录</el-button>
+        </div>
+      </section>
+
+      <section v-if="batchMode" class="settings-section">
+        <h3 class="settings-section-title">导出策略与间隔</h3>
+        <p class="mode-tip warn strategy-warn">
+          Token 短时间导出过多可能被语雀<strong>限流或临时屏蔽</strong>。请适当拉长等待时间，优先使用「随机间隔」和「自动多轮」。
+        </p>
+
+        <div class="field compact">
+          <label>执行方式</label>
+          <el-radio-group v-model="exportStrategy" class="strategy-group">
+            <el-radio-button value="continuous">连续导出</el-radio-button>
+            <el-radio-button value="batch_pause">分批暂停</el-radio-button>
+            <el-radio-button value="auto_round">自动多轮</el-radio-button>
+          </el-radio-group>
+        </div>
+
+        <div v-if="exportStrategy === 'batch_pause'" class="inline-inputs">
+          <span>每批</span>
+          <el-input-number v-model="batchLimitCount" :min="1" :max="9999" :step="1" />
+          <span>篇后暂停，确认无误再继续</span>
+        </div>
+
+        <div v-if="exportStrategy === 'auto_round'" class="strategy-grid">
+          <div class="inline-inputs">
+            <span>每轮</span>
+            <el-input-number v-model="batchLimitCount" :min="1" :max="9999" :step="1" />
+            <span>篇</span>
+          </div>
+          <div class="inline-inputs">
+            <span>共</span>
+            <el-input-number v-model="autoRoundCount" :min="1" :max="999" :step="1" />
+            <span>轮</span>
+          </div>
+          <div class="inline-inputs">
+            <span>轮间等待</span>
+            <el-input-number v-model="longDelayMinMin" :min="1" :max="600" :step="1" />
+            <span>~</span>
+            <el-input-number v-model="longDelayMaxMin" :min="1" :max="600" :step="1" />
+            <span>分钟</span>
+          </div>
+        </div>
+
+        <div class="delay-block">
+          <label class="sub-label">篇间间隔（每篇完成后）</label>
+          <el-radio-group v-model="delayMode" class="mode-group compact-radios">
+            <el-radio value="random">随机（推荐）</el-radio>
+            <el-radio value="fixed">固定</el-radio>
+            <el-radio value="none">无间隔</el-radio>
+          </el-radio-group>
+          <div v-if="delayMode === 'fixed'" class="inline-inputs">
+            <span>固定等待</span>
+            <el-input-number v-model="delayFixedSec" :min="1" :max="120" :step="1" />
+            <span>秒</span>
+          </div>
+          <div v-else-if="delayMode === 'random'" class="inline-inputs">
+            <span>随机</span>
+            <el-input-number v-model="delayMinSec" :min="1" :max="120" :step="1" />
+            <span>~</span>
+            <el-input-number v-model="delayMaxSec" :min="1" :max="120" :step="1" />
+            <span>秒</span>
+          </div>
+        </div>
+      </section>
+
+      <el-collapse class="settings-collapse">
+        <el-collapse-item title="格式与内容" name="format">
+          <div class="field image-mode">
+            <label>图片处理</label>
+            <el-radio-group :model-value="imageMode" @change="onImageModeChange">
+              <el-radio value="local">下载到本地 assets/</el-radio>
+              <el-radio value="online">保留语雀在线链接</el-radio>
+            </el-radio-group>
+          </div>
+          <div class="field">
+            <el-checkbox v-model="standardMarkdown">标准 Markdown（整理标题/表格/图片）</el-checkbox>
+          </div>
+          <div class="field">
+            <label>导出格式</label>
+            <div class="format-checks">
+              <el-checkbox v-model="exportMd">Markdown (.md)</el-checkbox>
+              <el-checkbox v-model="exportHtml">Confluence 网页 (.html)</el-checkbox>
+            </div>
+            <p class="mode-tip">表格 / 数据表会自动导出为 Excel (.xlsx)，不受上方格式影响。</p>
+          </div>
+          <div class="field">
+            <el-checkbox v-model="useDocFolder">
+              {{ batchMode ? '每篇独立子文件夹' : '使用独立子文件夹' }}
+            </el-checkbox>
+          </div>
+        </el-collapse-item>
+
+        <el-collapse-item v-if="batchMode" title="导出顺序" name="order">
+          <el-radio-group v-model="exportOrder" class="mode-group">
+            <el-radio value="top-down">从上到下</el-radio>
+            <el-radio value="bottom-up">从下到上</el-radio>
+            <el-radio value="custom">自定义勾选</el-radio>
+          </el-radio-group>
+          <div v-if="exportOrder === 'custom' && docTree.length" class="select-tree-wrap">
+            <div class="select-tree-actions">
+              <el-button link type="primary" @click="selectTreeRef?.selectAll()">全选</el-button>
+              <el-button link @click="selectTreeRef?.clearAll()">清空</el-button>
+              <span class="muted">已选 {{ selectedSlugs.length }} / {{ docProgressList.length }} 篇</span>
+            </div>
+            <div class="tree-scroll select-tree-scroll">
+              <YuqueExportSelectTree ref="selectTreeRef" v-model="selectedSlugs" :nodes="docTree" />
+            </div>
+          </div>
+          <p v-else-if="exportOrder === 'custom'" class="mode-tip">
+            请先点「预览知识库」加载目录后再勾选。
+          </p>
+        </el-collapse-item>
+
+        <el-collapse-item v-if="batchMode" title="断点续导与快照" name="advanced">
+          <el-checkbox v-model="resumeExport">继续上次导出（跳过已完成）</el-checkbox>
+          <el-checkbox v-model="stopOnError">遇错暂停</el-checkbox>
+          <div v-if="exportProgress && resumeExport" class="progress-card">
+            <p>
+              <strong>「{{ exportProgress.bookName }}」</strong>
+              {{ exportProgress.completed }}/{{ exportProgress.total }} 篇
+              <span v-if="exportProgress.remaining">，还剩 {{ exportProgress.remaining }} 篇</span>
+            </p>
+            <el-button v-if="exportProgress.bookDir" link type="primary" @click="openFolder(exportProgress.bookDir)">
+              打开已导出目录
+            </el-button>
+          </div>
+          <div class="snapshot-actions">
+            <el-button @click="handleExportSnapshot">导出 JSON 快照</el-button>
+            <el-button @click="handleImportSnapshot">导入 JSON 快照</el-button>
+          </div>
+        </el-collapse-item>
+      </el-collapse>
     </div>
-    <p v-if="batchMode && batchExportRunning" class="mode-tip pause-tip">
-      暂停会在<strong>当前这篇</strong>下载完成后生效，进度会自动保存。
-    </p>
-    <p v-else-if="batchMode && exportPaused" class="mode-tip pause-tip">
-      导出已暂停。修改格式、图片、间隔等选项后，勾选「继续上次导出」并点「继续导出」即可。
-    </p>
 
     <div v-if="showProgressPanel" class="progress-panel">
       <div class="progress-panel-head">
         <strong>{{ exportingActive ? '导出进度' : '知识库目录' }}：{{ progressBookName }}</strong>
         <span v-if="bookPreview?.total" class="catalog-total">共 {{ bookPreview.total }} 篇</span>
-        <span v-if="exportingActive" class="live-tag">实时更新中</span>
+        <span v-if="exportingActive" class="live-tag">实时更新</span>
         <span v-else-if="exportPaused" class="live-tag paused-tag">已暂停</span>
       </div>
       <p v-if="showCatalogHint" class="catalog-hint">
-        下方为知识库全部文档。✓ 已导出 · ✗ 失败 · ○ 待导出。点「批量导出知识库」后状态会实时更新。
+        ✓ 已导出 · ≈ 已重复 · ✗ 失败 · ○ 待导出。开始导出后状态会实时更新。
       </p>
       <div class="progress-bar-line">{{ progressBarText }}</div>
       <div class="progress-stats-row">
         <span class="stat done">✓ {{ progressStats.done }} 已完成</span>
+        <span v-if="progressStats.duplicate" class="stat duplicate">≈ {{ progressStats.duplicate }} 已重复</span>
         <span class="stat pending">○ {{ progressStats.remaining }} 待导出</span>
         <span v-if="progressStats.failed" class="stat failed">✗ {{ progressStats.failed }} 失败</span>
       </div>
-      <p v-if="progressStats.exporting" class="current-doc">
-        正在下载：<strong>{{ progressStats.exporting.title }}</strong>
-      </p>
       <div class="tree-scroll">
         <YuqueExportTree :nodes="docTree" />
       </div>
@@ -1376,7 +2020,8 @@ h2 {
   color: #93c5fd;
 }
 
-.delay-inputs {
+.delay-inputs,
+.batch-limit-inputs {
   display: flex;
   align-items: center;
   gap: 8px;
@@ -1409,6 +2054,27 @@ h2 {
   min-width: 280px;
 }
 
+.auto-round-inputs {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.export-settings {
+  &.locked {
+    opacity: 0.62;
+    pointer-events: none;
+    user-select: none;
+    filter: grayscale(0.15);
+  }
+}
+
+.lock-tip {
+  margin: -8px 0 12px;
+  color: #fbbf24;
+}
+
 .action-feedback {
   margin-bottom: 12px;
   white-space: pre-wrap;
@@ -1424,6 +2090,241 @@ h2 {
   display: flex;
   gap: 10px;
   margin-bottom: 20px;
+}
+
+.command-strip {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 16px;
+  padding: 14px 16px;
+  border-radius: 12px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+
+  :deep(.el-button:not(.is-link)) {
+    min-width: 96px;
+  }
+}
+
+.command-primary {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.yuque-page {
+  :deep(.el-button:not(.is-link)) {
+    height: 32px;
+    padding: 8px 15px;
+    font-size: 14px;
+  }
+}
+
+.status-hub {
+  margin-bottom: 16px;
+  padding: 16px 18px;
+  border-radius: 12px;
+  border: 1px solid rgba(59, 130, 246, 0.35);
+  background: rgba(59, 130, 246, 0.08);
+
+  &.exporting {
+    border-color: rgba(59, 130, 246, 0.35);
+    background: rgba(59, 130, 246, 0.08);
+  }
+
+  &.waiting {
+    border-color: rgba(34, 197, 94, 0.4);
+    background: rgba(34, 197, 94, 0.08);
+  }
+
+  &.paused {
+    border-color: rgba(245, 158, 11, 0.4);
+    background: rgba(245, 158, 11, 0.08);
+  }
+}
+
+.status-hub-main {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 20px;
+  flex-wrap: wrap;
+}
+
+.status-hub-text {
+  flex: 1;
+  min-width: 200px;
+}
+
+.status-phase-tag {
+  display: inline-block;
+  margin-bottom: 6px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.status-title {
+  margin: 0 0 4px;
+  font-size: 15px;
+  font-weight: 600;
+  line-height: 1.5;
+}
+
+.status-detail,
+.status-hint {
+  margin: 4px 0 0;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-muted);
+}
+
+.status-countdown {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+.countdown-label {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.countdown-value {
+  font-size: 28px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.1;
+  letter-spacing: -0.02em;
+}
+
+.status-hub-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+
+  :deep(.el-button) {
+    min-width: 96px;
+  }
+}
+
+.settings-section {
+  margin-bottom: 16px;
+  padding: 16px 18px;
+  border-radius: 12px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+}
+
+.settings-section-title {
+  margin: 0 0 14px;
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.settings-collapse {
+  margin-bottom: 16px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  overflow: hidden;
+  --el-collapse-border-color: var(--border);
+  --el-collapse-header-bg-color: var(--surface-2);
+  --el-collapse-content-bg-color: var(--surface);
+  --el-collapse-header-text-color: var(--text);
+  --el-collapse-header-font-size: 14px;
+
+  :deep(.el-collapse-item__header) {
+    padding: 0 16px;
+    height: 44px;
+    font-weight: 600;
+    font-size: 14px;
+    color: var(--text) !important;
+    background: var(--surface-2);
+    border-bottom: 1px solid transparent;
+    transition: background 0.15s, color 0.15s;
+
+    &:hover {
+      background: #2a3a52;
+      color: var(--text) !important;
+    }
+
+    .el-collapse-item__arrow {
+      color: var(--text-muted);
+    }
+  }
+
+  :deep(.el-collapse-item.is-active > .el-collapse-item__header) {
+    color: var(--text) !important;
+    background: var(--surface-2);
+    border-bottom-color: var(--border);
+  }
+
+  :deep(.el-collapse-item__wrap) {
+    background: var(--surface);
+    border-bottom: 1px solid var(--border);
+  }
+
+  :deep(.el-collapse-item:last-child .el-collapse-item__wrap) {
+    border-bottom: none;
+  }
+
+  :deep(.el-collapse-item__content) {
+    padding: 8px 16px 16px;
+    color: var(--text);
+  }
+}
+
+.strategy-group {
+  display: flex;
+  flex-wrap: wrap;
+}
+
+.strategy-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.strategy-warn {
+  margin-top: 0;
+  margin-bottom: 12px;
+}
+
+.inline-inputs {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 10px;
+  font-size: 13px;
+  color: var(--text-muted);
+}
+
+.delay-block {
+  margin-top: 14px;
+  padding-top: 14px;
+  border-top: 1px dashed var(--border);
+}
+
+.field.compact {
+  margin-bottom: 12px;
+}
+
+.compact-radios {
+  margin-top: 6px;
 }
 
 .preview-card {
@@ -1558,6 +2459,7 @@ h2 {
 
   .stat {
     &.done { color: #22c55e; }
+    &.duplicate { color: #fbbf24; }
     &.pending { color: var(--text-muted); }
     &.failed { color: #ef4444; }
   }
@@ -1599,6 +2501,10 @@ h2 {
   flex-wrap: wrap;
   gap: 10px;
   margin-top: 8px;
+
+  :deep(.el-button) {
+    min-width: 96px;
+  }
 }
 
 .progress-card {

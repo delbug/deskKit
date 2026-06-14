@@ -1,4 +1,4 @@
-export type DocStatus = 'pending' | 'done' | 'failed' | 'exporting';
+export type DocStatus = 'pending' | 'done' | 'failed' | 'exporting' | 'duplicate';
 
 export interface DocProgressItem {
   slug: string;
@@ -27,8 +27,10 @@ export interface ExportProgressDetail {
   remaining?: number;
   failedCount?: number;
   status?: string;
+  delayUntil?: string;
   currentSlug?: string | null;
   completedSlugs?: string[];
+  duplicateSlugs?: string[];
   failed?: { slug: string; title?: string; message: string }[];
   docs?: DocProgressItem[];
 }
@@ -41,6 +43,7 @@ export function mergeDocProgress(
   if (!catalog.length) return [];
 
   const completed = new Set(detail?.completedSlugs || []);
+  const duplicate = new Set(detail?.duplicateSlugs || []);
   const failedMap = new Map((detail?.failed || []).map((f) => [f.slug, f.message]));
   const current = detail?.currentSlug;
   const statusFromDetail = new Map((detail?.docs || []).map((d) => [d.slug, d]));
@@ -60,11 +63,13 @@ export function mergeDocProgress(
       ...d,
       status: current === d.slug
         ? 'exporting'
-        : completed.has(d.slug)
-          ? 'done'
-          : failedMap.has(d.slug)
-            ? 'failed'
-            : 'pending',
+        : failedMap.has(d.slug)
+          ? 'failed'
+          : duplicate.has(d.slug)
+            ? 'duplicate'
+            : completed.has(d.slug)
+              ? 'done'
+              : 'pending',
       failMessage: failedMap.get(d.slug),
     };
   });
@@ -105,7 +110,7 @@ export function buildDocTree(docs: DocProgressItem[]): DocTreeNode[] {
 
 function annotateCounts(node: DocTreeNode): { done: number; total: number } {
   if (node.type === 'doc' && node.doc) {
-    const done = node.doc.status === 'done' ? 1 : 0;
+    const done = node.doc.status === 'done' || node.doc.status === 'duplicate' ? 1 : 0;
     node.doneCount = done;
     node.totalCount = 1;
     return { done, total: 1 };

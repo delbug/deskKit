@@ -3,6 +3,7 @@ mod confluence;
 mod duplicates;
 mod find_files;
 mod fs_util;
+mod md5_tool;
 mod models;
 mod rename_ops;
 mod yuque;
@@ -40,6 +41,7 @@ fn get_health() -> HealthResponse {
             "favorites".into(),
             "duplicates".into(),
             "find-files".into(),
+            "md5".into(),
             "yuque".into(),
             "confluence".into(),
             "config".into(),
@@ -91,10 +93,20 @@ async fn compare_folders(
     folders: Vec<FolderItem>,
     mode: CompareMode,
     ignore_patterns: Option<Vec<String>>,
+    min_size_kb: Option<u64>,
+    extension_mode: Option<CompareExtensionMode>,
+    compare_extensions: Option<Vec<String>>,
 ) -> Result<CompareResult, String> {
-    run_compare_folders(folders, mode, ignore_patterns.unwrap_or_default())
-        .await
-        .map_err(|e| e.to_string())
+    run_compare_folders(
+        folders,
+        mode,
+        ignore_patterns.unwrap_or_default(),
+        min_size_kb,
+        extension_mode.unwrap_or(CompareExtensionMode::None),
+        compare_extensions.unwrap_or_default(),
+    )
+    .await
+    .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -326,6 +338,58 @@ async fn confluence_convert(params: ConfluenceConvertParams) -> Result<serde_jso
     batch_convert_markdown(params).await
 }
 
+#[tauri::command]
+async fn pick_file_path(app: tauri::AppHandle) -> Result<PickFileResponse, String> {
+    match app
+        .dialog()
+        .file()
+        .set_title("选择文件")
+        .blocking_pick_file()
+    {
+        Some(p) => Ok(PickFileResponse {
+            cancelled: false,
+            path: Some(p.to_string()),
+        }),
+        None => Ok(PickFileResponse {
+            cancelled: true,
+            path: None,
+        }),
+    }
+}
+
+#[tauri::command]
+async fn scan_md5(
+    path: String,
+    min_size_kb: Option<u64>,
+    ignore_patterns: Option<Vec<String>>,
+) -> Result<Md5ScanResult, String> {
+    md5_tool::scan_md5(&path, min_size_kb, ignore_patterns.unwrap_or_default())
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn export_md5_manifest(entries: Vec<FileMeta>) -> Result<serde_json::Value, String> {
+    let content = md5_tool::md5_manifest_csv(&entries);
+    Ok(serde_json::json!({ "content": content }))
+}
+
+#[tauri::command]
+fn batch_rename_by_md5(
+    root_path: String,
+    entries: Vec<Md5RenameItem>,
+    mode: Md5RenameMode,
+    dry_run: Option<bool>,
+) -> Result<Md5RenameResult, String> {
+    md5_tool::batch_rename_by_md5(&root_path, entries, mode, dry_run.unwrap_or(false))
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn verify_md5_manifest(entries: Vec<FileMeta>, manifest_text: String) -> Result<Md5VerifyResult, String> {
+    Ok(md5_tool::verify_md5_manifest(&entries, &manifest_text))
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -356,6 +420,11 @@ pub fn run() {
             import_yuque_progress,
             pick_save_file,
             pick_open_file,
+            pick_file_path,
+            scan_md5,
+            export_md5_manifest,
+            batch_rename_by_md5,
+            verify_md5_manifest,
             write_text_file,
             read_text_file,
             confluence_list,

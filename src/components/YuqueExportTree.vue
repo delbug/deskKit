@@ -10,6 +10,7 @@ defineProps<{
 
 function statusIcon(status?: string) {
   if (status === 'done') return '✓';
+  if (status === 'duplicate') return '≈';
   if (status === 'failed') return '✗';
   if (status === 'exporting') return '…';
   return '○';
@@ -29,6 +30,7 @@ function statusIcon(status?: string) {
         <span class="doc-title">{{ node.name }}</span>
         <span v-if="node.doc?.status === 'exporting'" class="tag exporting">下载中</span>
         <span v-else-if="node.doc?.status === 'failed'" class="tag failed" :title="node.doc.failMessage">失败</span>
+        <span v-else-if="node.doc?.status === 'duplicate'" class="tag duplicate">已重复未导出</span>
         <span v-else-if="node.doc?.status === 'pending'" class="tag pending">待导出</span>
         <span v-else-if="node.doc?.status === 'done'" class="tag done">已导出</span>
       </div>
@@ -111,6 +113,15 @@ function statusIcon(status?: string) {
     }
   }
 
+  &.duplicate {
+    color: var(--text-muted);
+
+    .status-icon {
+      color: #f59e0b;
+      font-weight: 700;
+    }
+  }
+
   &.pending .status-icon {
     color: var(--text-muted);
     opacity: 0.5;
@@ -156,6 +167,11 @@ function statusIcon(status?: string) {
   &.done {
     background: rgba(34, 197, 94, 0.12);
     color: #4ade80;
+  }
+
+  &.duplicate {
+    background: rgba(245, 158, 11, 0.15);
+    color: #fbbf24;
   }
 }
 </style>

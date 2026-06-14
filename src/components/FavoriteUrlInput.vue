@@ -17,12 +17,17 @@ withDefaults(
   },
 );
 
-const { filterUrlFavorites, promptSaveUrl, reload } = usePathUrlFavorites();
+const { filterUrlFavorites, promptSaveUrl, reload, findUrlFavorite, urlFavorites } = usePathUrlFavorites();
 const open = ref(false);
 
 onMounted(() => reload());
 
 const suggestions = computed(() => filterUrlFavorites(model.value));
+
+const isFavorited = computed(() => {
+  urlFavorites.value;
+  return !!findUrlFavorite(model.value);
+});
 
 function onFocus() {
   open.value = true;
@@ -63,9 +68,16 @@ async function onSave() {
         </li>
       </ul>
     </div>
-    <el-button v-if="showSave && model.trim()" link type="warning" size="small" @click="onSave">
-      <el-icon><Star /></el-icon>
-      收藏此网址
+    <el-button
+      v-if="showSave && model.trim()"
+      link
+      type="warning"
+      size="small"
+      :class="{ 'is-favorited': isFavorited }"
+      @click="onSave"
+    >
+      <el-icon><StarFilled v-if="isFavorited" /><Star v-else /></el-icon>
+      {{ isFavorited ? '已收藏' : '收藏此网址' }}
     </el-button>
   </div>
 </template>
@@ -114,6 +126,12 @@ async function onSave() {
       color: var(--text-muted);
       word-break: break-all;
     }
+  }
+}
+
+.is-favorited {
+  :deep(.el-icon) {
+    color: #f59e0b;
   }
 }
 </style>

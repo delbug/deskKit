@@ -12,6 +12,7 @@ const menus = [
   { path: '/rename', title: '批量重命名', icon: 'EditPen' },
   { path: '/duplicates', title: '重复文件', icon: 'CopyDocument' },
   { path: '/find-files', title: '查找文件', icon: 'Search' },
+  { path: '/md5', title: 'MD5 工具', icon: 'Key' },
   { path: '/yuque', title: '语雀导出', icon: 'Download' },
   { path: '/confluence', title: 'Confluence 转换', icon: 'Document' },
   { path: '/favorites', title: '收藏管理', icon: 'Star' },

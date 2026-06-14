@@ -1,7 +1,7 @@
 use crate::fs_util::{copy_file_safe, resolve_safe_dir, walk_files, FsError};
 use crate::models::{
-    CompareMode, CompareResult, CompareStats, DiffEntry, FileMeta, FolderItem, FolderMeta,
-    SyncParams, SyncPreviewOperation, SyncPreviewSummary, SyncStrategy,
+    CompareExtensionMode, CompareMode, CompareResult, CompareStats, DiffEntry, FileMeta, FolderItem,
+    FolderMeta, SyncParams, SyncPreviewOperation, SyncPreviewSummary, SyncStrategy,
 };
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -213,9 +213,15 @@ pub async fn compare_folders(
     folders: Vec<FolderItem>,
     mode: CompareMode,
     ignore_patterns: Vec<String>,
+    min_size_kb: Option<u64>,
+    extension_mode: CompareExtensionMode,
+    compare_extensions: Vec<String>,
 ) -> Result<CompareResult, FsError> {
     if folders.len() < 2 {
         return Err(FsError::Message("请至少添加 2 个文件夹".into()));
+    }
+    if extension_mode != CompareExtensionMode::None && compare_extensions.is_empty() {
+        return Err(FsError::Message("请选择至少一种文件格式".into()));
     }
 
     let mut folders = folders;
@@ -227,9 +233,15 @@ pub async fn compare_folders(
     let mut folder_maps: HashMap<String, HashMap<String, FileMeta>> = HashMap::new();
     let mut folder_meta: HashMap<String, FolderMeta> = HashMap::new();
 
+    let walk_options = crate::fs_util::WalkFilterOptions {
+        min_size_bytes: min_size_kb.unwrap_or(0).saturating_mul(1024),
+        extension_mode,
+        extensions: compare_extensions,
+    };
+
     for folder in &folders {
         let root = resolve_safe_dir(&folder.path)?;
-        let raw = walk_files(&root, &ignore_patterns);
+        let raw = crate::fs_util::walk_files_filtered(&root, &ignore_patterns, walk_options.clone());
         let file_count = raw.len();
         let label = if folder.label.is_empty() {
             root.file_name()
@@ -933,4 +945,117 @@ pub fn move_files(
         }
     }
     Ok((moved, errors))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::{CompareMode, FolderItem};
+    use std::io::Write;
+
+    fn write_file(dir: &Path, name: &str, bytes: &[u8]) {
+        let path = dir.join(name);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        let mut f = std::fs::File::create(&path).unwrap();
+        f.write_all(bytes).unwrap();
+    }
+
+    #[tokio::test]
+    async fn compare_folders_excludes_files_below_min_size_kb() {
+        let base = tempfile::tempdir().unwrap();
+        let dir_a = base.path().join("a");
+        let dir_b = base.path().join("b");
+        std::fs::create_dir_all(&dir_a).unwrap();
+        std::fs::create_dir_all(&dir_b).unwrap();
+
+        write_file(&dir_a, "tiny.txt", b"x");
+        write_file(&dir_a, "shared.bin", &vec![1u8; 2048]);
+        write_file(&dir_b, "shared.bin", &vec![1u8; 2048]);
+
+        let folders = vec![
+            FolderItem {
+                id: "a".into(),
+                path: dir_a.to_string_lossy().into_owned(),
+                label: String::new(),
+                is_primary: true,
+            },
+            FolderItem {
+                id: "b".into(),
+                path: dir_b.to_string_lossy().into_owned(),
+                label: String::new(),
+                is_primary: false,
+            },
+        ];
+
+        let with_filter = compare_folders(
+            folders.clone(),
+            CompareMode::Name,
+            vec![],
+            Some(1),
+            CompareExtensionMode::None,
+            vec![],
+        )
+            .await
+            .unwrap();
+        assert_eq!(with_filter.stats.identical, 1);
+        assert!(!with_filter.entries.iter().any(|e| e.relative_path == "tiny.txt"));
+
+        let without_filter = compare_folders(
+            folders,
+            CompareMode::Name,
+            vec![],
+            None,
+            CompareExtensionMode::None,
+            vec![],
+        )
+            .await
+            .unwrap();
+        assert!(without_filter.entries.iter().any(|e| e.relative_path == "tiny.txt"));
+    }
+
+    #[tokio::test]
+    async fn compare_folders_include_extension_only() {
+        let base = tempfile::tempdir().unwrap();
+        let dir_a = base.path().join("a");
+        let dir_b = base.path().join("b");
+        std::fs::create_dir_all(&dir_a).unwrap();
+        std::fs::create_dir_all(&dir_b).unwrap();
+
+        write_file(&dir_a, "doc.pdf", b"pdf");
+        write_file(&dir_a, "note.txt", b"txt");
+        write_file(&dir_b, "doc.pdf", b"pdf");
+        write_file(&dir_b, "note.txt", b"txt");
+
+        let folders = vec![
+            FolderItem {
+                id: "a".into(),
+                path: dir_a.to_string_lossy().into_owned(),
+                label: String::new(),
+                is_primary: true,
+            },
+            FolderItem {
+                id: "b".into(),
+                path: dir_b.to_string_lossy().into_owned(),
+                label: String::new(),
+                is_primary: false,
+            },
+        ];
+
+        let result = compare_folders(
+            folders,
+            CompareMode::Name,
+            vec![],
+            None,
+            CompareExtensionMode::Include,
+            vec!["pdf".into()],
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result.stats.total, 1);
+        assert_eq!(result.entries[0].relative_path, "doc.pdf");
+        assert_eq!(result.stats.identical, 1);
+    }
 }

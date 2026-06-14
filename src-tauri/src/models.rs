@@ -9,6 +9,15 @@ pub enum CompareMode {
     Md5,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum CompareExtensionMode {
+    #[default]
+    None,
+    Include,
+    Exclude,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FolderItem {
@@ -285,6 +294,56 @@ pub struct DuplicateStats {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct Md5ScanStats {
+    pub total: usize,
+    pub errors: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Md5ScanResult {
+    pub root_path: String,
+    pub is_file: bool,
+    pub entries: Vec<FileMeta>,
+    pub stats: Md5ScanStats,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum Md5RenameMode {
+    Prefix,
+    Suffix,
+    HashOnly,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Md5RenameItem {
+    pub relative_path: String,
+    pub md5: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Md5RenameResult {
+    pub renamed: usize,
+    pub skipped: usize,
+    pub dry_run: bool,
+    pub errors: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Md5VerifyResult {
+    pub matched: usize,
+    pub mismatched: usize,
+    pub missing: usize,
+    pub total: usize,
+    pub details: Vec<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct FindFilesParams {
     pub root_path: String,
     #[serde(default)]
@@ -378,6 +437,9 @@ pub struct YuqueBatchParams {
     pub export_order: String,
     #[serde(default)]
     pub selected_slugs: Option<Vec<String>>,
+    /// 每轮最多新导出篇数，达到后自动暂停；None 或 0 表示不限制
+    #[serde(default)]
+    pub batch_limit: Option<u32>,
 }
 
 fn default_export_order() -> String {
@@ -455,6 +517,11 @@ pub struct YuqueProgressState {
     pub export_order: Option<String>,
     #[serde(default)]
     pub selected_slugs: Option<Vec<String>>,
+    #[serde(default)]
+    pub duplicate_slugs: Option<Vec<String>>,
+    /// 篇间等待结束时间（RFC3339），供前端显示倒计时
+    #[serde(default)]
+    pub delay_until: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -463,6 +530,10 @@ pub struct YuqueDocPreview {
     pub title: String,
     pub slug: String,
     pub dir_path: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub doc_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub doc_type_label: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

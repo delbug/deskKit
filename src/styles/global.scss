@@ -300,6 +300,23 @@ body {
   --el-messagebox-title-color: var(--text);
 }
 
+.el-collapse {
+  --el-collapse-border-color: var(--border);
+  --el-collapse-header-bg-color: var(--surface-2);
+  --el-collapse-content-bg-color: var(--surface);
+  --el-collapse-header-text-color: var(--text);
+  --el-collapse-header-font-size: 14px;
+
+  .el-collapse-item__header {
+    color: var(--text) !important;
+    font-weight: 600;
+
+    .el-collapse-item__arrow {
+      color: var(--text-muted);
+    }
+  }
+}
+
 .primary-badge {
   font-size: 10px;
   padding: 2px 8px;

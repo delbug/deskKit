@@ -9,6 +9,7 @@ const router = createRouter({
     { path: '/favorites', name: 'favorites', component: () => import('@/views/FavoritesView.vue'), meta: { title: '收藏管理' } },
     { path: '/duplicates', name: 'duplicates', component: () => import('@/views/DuplicatesView.vue'), meta: { title: '重复文件' } },
     { path: '/find-files', name: 'findFiles', component: () => import('@/views/FindFilesView.vue'), meta: { title: '查找文件' } },
+    { path: '/md5', name: 'md5', component: () => import('@/views/Md5View.vue'), meta: { title: 'MD5 工具' } },
     { path: '/yuque', name: 'yuque', component: () => import('@/views/YuqueView.vue'), meta: { title: '语雀导出' } },
     { path: '/confluence', name: 'confluence', component: () => import('@/views/ConfluenceView.vue'), meta: { title: 'Confluence 转换' } },
     { path: '/settings', name: 'settings', component: () => import('@/views/SettingsView.vue'), meta: { title: '设置' } },

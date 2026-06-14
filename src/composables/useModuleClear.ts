@@ -12,6 +12,7 @@ export type ModuleId =
   | 'favorites'
   | 'duplicates'
   | 'findFiles'
+  | 'md5'
   | 'yuque'
   | 'confluence'
   | 'settings';
@@ -22,6 +23,7 @@ export const MODULE_STORAGE_KEYS: Record<ModuleId, string[]> = {
   favorites: [],
   duplicates: ['dup-last-path'],
   findFiles: ['find-files-last-path', 'find-files-match-mode', 'find-files-pattern', 'find-files-size-enabled', 'find-files-size-unit', 'find-files-min-size', 'find-files-max-size'],
+  md5: ['md5-last-path'],
   yuque: [
     'yuque-last-url',
     'yuque-save-dir',
@@ -65,6 +67,7 @@ export const MODULE_LABELS: Record<ModuleId, string> = {
   findFiles: '查找文件',
   yuque: '语雀导出',
   confluence: 'Confluence 转换',
+  md5: 'MD5 工具',
   settings: '设置',
 };
 

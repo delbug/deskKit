@@ -738,7 +738,7 @@ dependencies = [
 
 [[package]]
 name = "deskkit"
-version = "1.0.4"
+version = "1.0.6"
 dependencies = [
  "base64 0.22.1",
  "chrono",
@@ -759,6 +759,7 @@ dependencies = [
  "tauri-build",
  "tauri-plugin-dialog",
  "tauri-plugin-opener",
+ "tempfile",
  "thiserror 1.0.69",
  "tokio",
  "url",

@@ -19,12 +19,12 @@ import SyncPreviewDialog from '@/components/SyncPreviewDialog.vue';
 import { useConfig } from '@/composables/useConfig';
 import { useFavorites } from '@/composables/useFavorites';
 import { addRecentPath } from '@/utils/appStorage';
-import type { CompareMode, CompareResult, DiffEntry, FilterType, FolderItem, SyncPreviewOperation, SyncPreviewSummary, SyncStrategy } from '@/types';
+import type { CompareExtensionMode, CompareMode, CompareResult, DiffEntry, FilterType, FolderItem, SyncPreviewOperation, SyncPreviewSummary, SyncStrategy } from '@/types';
 import type { FavoriteItem } from '@/types';
 
 const router = useRouter();
 const route = useRoute();
-const { config, load, saveLastSession, restoreFolders } = useConfig();
+const { config, load, saveLastSession, restoreFolders, persist } = useConfig();
 const { favorites, load: loadFavorites, applyFavorite, addFavorite } = useFavorites();
 
 const folders = ref<FolderItem[]>(defaultFolders());
@@ -38,6 +38,9 @@ const selectedPaths = ref<Set<string>>(new Set());
 const syncStrategy = ref<SyncStrategy>('primary-overwrite');
 const syncTargetId = ref('');
 const syncSourceId = ref('');
+const minSizeKb = ref(0);
+const extensionMode = ref<CompareExtensionMode>('none');
+const compareExtensions = ref<string[]>([]);
 const favName = ref('');
 const previewVisible = ref(false);
 const previewOps = ref<SyncPreviewOperation[]>([]);
@@ -86,7 +89,25 @@ const extensionOptions = computed(() => {
     .map(([ext, count]) => ({ ext, count }));
 });
 
+const COMMON_COMPARE_EXTENSIONS = [
+  'pdf', 'doc', 'docx', 'xls', 'xlsx', 'ppt', 'pptx', 'txt', 'md', 'html',
+  'css', 'js', 'ts', 'json', 'png', 'jpg', 'jpeg', 'gif', 'webp', 'mp4', 'zip',
+  '(无后缀)',
+];
+
+const extensionFilterEnabled = computed(() => extensionMode.value !== 'none');
 const extensionFilterActive = computed(() => selectedExtensions.value.length > 0);
+
+function normalizeCompareExtension(ext: string) {
+  const s = ext.trim().replace(/^\./, '').toLowerCase();
+  return s === '无后缀' ? '(无后缀)' : s;
+}
+
+function onExtensionModeChange(mode: CompareExtensionMode | string | number | boolean | undefined) {
+  const next = (mode ?? 'none') as CompareExtensionMode;
+  extensionMode.value = next;
+  if (next === 'none') compareExtensions.value = [];
+}
 
 const selectedCount = computed(() => selectedPaths.value.size);
 const allSelected = computed(
@@ -108,6 +129,15 @@ watch(() => route.path, async (p) => {
 async function initFromConfig() {
   await load();
   if (config.value?.settings?.compareMode) compareMode.value = config.value.settings.compareMode;
+  if (config.value?.settings?.compareMinSizeKb != null) {
+    minSizeKb.value = config.value.settings.compareMinSizeKb;
+  }
+  if (config.value?.settings?.compareExtensionMode) {
+    extensionMode.value = config.value.settings.compareExtensionMode;
+  }
+  if (config.value?.settings?.compareExtensions?.length) {
+    compareExtensions.value = [...config.value.settings.compareExtensions];
+  }
   const restored = restoreFolders();
   if (restored) {
     folders.value = restored;
@@ -205,15 +235,36 @@ function setPrimary(id: string) {
 async function runCompare() {
   const valid = folders.value.filter((f) => f.path.trim());
   if (valid.length < 2) return ElMessage.warning('请为至少 2 个文件夹选择路径');
+  if (extensionMode.value !== 'none' && compareExtensions.value.length === 0) {
+    return ElMessage.warning('请选择至少一种文件格式');
+  }
   loading.value = true;
   selectedPaths.value = new Set();
   selectedExtensions.value = [];
+  const normalizedExtensions = compareExtensions.value.map(normalizeCompareExtension);
   try {
-    const res = await compareFolders(valid, compareMode.value, config.value?.settings?.ignorePatterns);
+    const res = await compareFolders(
+      valid,
+      compareMode.value,
+      config.value?.settings?.ignorePatterns,
+      minSizeKb.value,
+      extensionMode.value,
+      extensionMode.value === 'none' ? undefined : normalizedExtensions,
+    );
     compareResult.value = res;
     for (const f of valid) addRecentPath(f.path);
     syncSourceId.value = res.primaryId;
     syncTargetId.value = valid.find((f) => f.id !== res.primaryId)?.id || '';
+    if (config.value) {
+      await persist({
+        settings: {
+          ...config.value.settings,
+          compareMinSizeKb: minSizeKb.value,
+          compareExtensionMode: extensionMode.value,
+          compareExtensions: extensionMode.value === 'none' ? [] : normalizedExtensions,
+        },
+      });
+    }
     ElMessage.success(`对比完成，共 ${res.stats.total} 个文件`);
   } catch (err: any) {
     ElMessage.error(err.message);
@@ -499,6 +550,50 @@ function handleClearCompare() {
               <el-radio value="md5">MD5 内容</el-radio>
               <el-radio value="name">仅路径</el-radio>
             </el-radio-group>
+            <div class="min-size-field">
+              <label>最小文件大小</label>
+              <div class="min-size-row">
+                <el-input-number v-model="minSizeKb" :min="0" :max="999999" :step="1" controls-position="right" />
+                <span class="min-size-unit">KB 以上才参与对比</span>
+              </div>
+              <p class="min-size-hint">设为 0 表示不限制；小文件会被跳过，可显著加快 MD5 对比。</p>
+            </div>
+            <div class="ext-compare-field">
+              <label>文件格式范围</label>
+              <el-radio-group
+                :model-value="extensionMode"
+                class="radio-row ext-mode-row"
+                @update:model-value="onExtensionModeChange"
+              >
+                <el-radio value="none">不限制</el-radio>
+                <el-radio value="include">仅对比</el-radio>
+                <el-radio value="exclude">排除</el-radio>
+              </el-radio-group>
+              <el-select
+                v-if="extensionFilterEnabled"
+                v-model="compareExtensions"
+                multiple
+                collapse-tags
+                collapse-tags-tooltip
+                filterable
+                allow-create
+                default-first-option
+                clearable
+                placeholder="选择或输入后缀，如 pdf、jpg"
+                class="sidebar-full-width ext-compare-select"
+              >
+                <el-option
+                  v-for="ext in COMMON_COMPARE_EXTENSIONS"
+                  :key="ext"
+                  :label="ext.startsWith('(') ? ext : `.${ext}`"
+                  :value="ext"
+                />
+              </el-select>
+              <p v-if="extensionFilterEnabled" class="min-size-hint">
+                {{ extensionMode === 'include' ? '只扫描并对比所选格式的文件。' : '跳过所选格式，对比其余文件。' }}
+                「仅对比」与「排除」不可同时使用。
+              </p>
+            </div>
             <el-button type="primary" class="sidebar-btn sidebar-btn-primary" :loading="loading" @click="runCompare">
               <el-icon><Search /></el-icon> 开始对比
             </el-button>
@@ -550,7 +645,7 @@ function handleClearCompare() {
         </div>
         <div v-if="compareResult" class="ext-filter-bar">
           <div class="ext-filter-top">
-            <span class="ext-filter-label">后缀筛选</span>
+            <span class="ext-filter-label">结果后缀筛选</span>
             <el-select
               v-model="selectedExtensions"
               multiple
@@ -911,6 +1006,55 @@ function handleClearCompare() {
     color: var(--text);
     font-weight: 600;
   }
+}
+
+.min-size-field {
+  margin-top: 12px;
+
+  label {
+    display: block;
+    margin-bottom: 6px;
+    font-size: 12px;
+    color: var(--text-muted);
+  }
+}
+
+.min-size-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.min-size-unit {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.min-size-hint {
+  margin: 8px 0 12px;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--text-muted);
+}
+
+.ext-compare-field {
+  margin-top: 4px;
+
+  label {
+    display: block;
+    margin-bottom: 6px;
+    font-size: 12px;
+    color: var(--text-muted);
+  }
+}
+
+.ext-mode-row {
+  margin-bottom: 8px;
+}
+
+.ext-compare-select {
+  width: 100%;
 }
 
 .action-meta {

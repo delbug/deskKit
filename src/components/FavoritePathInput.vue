@@ -22,12 +22,17 @@ withDefaults(
   },
 );
 
-const { filterPathFavorites, promptSavePath, reload } = usePathUrlFavorites();
+const { filterPathFavorites, promptSavePath, reload, findPathFavorite, pathFavorites } = usePathUrlFavorites();
 const open = ref(false);
 
 onMounted(() => reload());
 
 const suggestions = computed(() => filterPathFavorites(model.value));
+
+const isFavorited = computed(() => {
+  pathFavorites.value;
+  return !!findPathFavorite(model.value);
+});
 
 function onFocus() {
   open.value = true;
@@ -81,8 +86,16 @@ async function onSave() {
       <el-button v-if="showPicker" :size="size" @click="onPick">
         <el-icon><Folder /></el-icon>
       </el-button>
-      <el-button v-if="showSave && model.trim()" :size="size" link type="warning" title="收藏此路径" @click="onSave">
-        <el-icon><Star /></el-icon>
+      <el-button
+        v-if="showSave && model.trim()"
+        :size="size"
+        link
+        type="warning"
+        :class="{ 'is-favorited': isFavorited }"
+        :title="isFavorited ? '已在收藏中' : '收藏此路径'"
+        @click="onSave"
+      >
+        <el-icon><StarFilled v-if="isFavorited" /><Star v-else /></el-icon>
       </el-button>
     </div>
   </div>
@@ -140,6 +153,12 @@ async function onSave() {
       color: var(--text-muted);
       word-break: break-all;
     }
+  }
+}
+
+.is-favorited {
+  :deep(.el-icon) {
+    color: #f59e0b;
   }
 }
 </style>

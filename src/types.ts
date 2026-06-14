@@ -1,5 +1,7 @@
 export type CompareMode = 'name' | 'md5';
 
+export type CompareExtensionMode = 'none' | 'include' | 'exclude';
+
 export type DiffStatus =
   | 'identical'
   | 'missing'
@@ -48,6 +50,9 @@ export interface AppSettings {
   compareMode: CompareMode;
   ignorePatterns: string[];
   defaultSyncStrategy: string;
+  compareMinSizeKb?: number;
+  compareExtensionMode?: CompareExtensionMode;
+  compareExtensions?: string[];
 }
 
 export interface AppConfig {
@@ -175,4 +180,37 @@ export interface FindFileEntry {
   absolutePath: string;
   size: number;
   mtime: number;
+}
+
+export interface Md5FileEntry {
+  relativePath: string;
+  absolutePath: string;
+  size: number;
+  mtime: number;
+  md5?: string | null;
+  error?: string | null;
+}
+
+export interface Md5ScanResult {
+  rootPath: string;
+  isFile: boolean;
+  entries: Md5FileEntry[];
+  stats: { total: number; errors: number };
+}
+
+export type Md5RenameMode = 'prefix' | 'suffix' | 'hashOnly';
+
+export interface Md5RenameResult {
+  renamed: number;
+  skipped: number;
+  dryRun: boolean;
+  errors: string[];
+}
+
+export interface Md5VerifyResult {
+  matched: number;
+  mismatched: number;
+  missing: number;
+  total: number;
+  details: { path?: string; expected?: string; actual?: string; status: string }[];
 }

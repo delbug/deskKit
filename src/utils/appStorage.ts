@@ -56,6 +56,8 @@ export interface YuqueProgressState {
   updatedAt?: string;
   exportOrder?: string;
   selectedSlugs?: string[];
+  duplicateSlugs?: string[];
+  delayUntil?: string;
 }
 
 function readJson<T>(key: string, fallback: T): T {

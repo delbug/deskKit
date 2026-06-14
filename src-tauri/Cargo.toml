@@ -1,6 +1,6 @@
 [package]
 name = "deskkit"
-version = "1.0.4"
+version = "1.0.6"
 description = "DeskKit — 本地文件与文档工具集"
 authors = ["吴江"]
 edition = "2021"
@@ -35,3 +35,6 @@ thiserror = "1"
 mime_guess = "2"
 percent-encoding = "2"
 pathdiff = "0.2"
+
+[dev-dependencies]
+tempfile = "3"

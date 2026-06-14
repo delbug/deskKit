@@ -1,6 +1,7 @@
 import { invoke } from '@tauri-apps/api/core';
 import type {
   AppConfig,
+  CompareExtensionMode,
   CompareMode,
   CompareResult,
   DuplicateGroup,
@@ -8,6 +9,11 @@ import type {
   FindFileEntry,
   FindFilesMatchMode,
   FolderItem,
+  Md5FileEntry,
+  Md5RenameMode,
+  Md5RenameResult,
+  Md5ScanResult,
+  Md5VerifyResult,
   RenamePlanItem,
   RenameRules,
   SyncPreviewOperation,
@@ -60,8 +66,23 @@ export function saveFavorite(action: 'add' | 'remove' | 'update', favorite: Part
   return Promise.resolve({ favorites: saveFavoriteAction(action, favorite) });
 }
 
-export async function compareFolders(folders: FolderItem[], mode: CompareMode, ignorePatterns?: string[]) {
-  return invokeOk<CompareResult>('compare_folders', { folders, mode, ignorePatterns });
+export async function compareFolders(
+  folders: FolderItem[],
+  mode: CompareMode,
+  ignorePatterns?: string[],
+  minSizeKb?: number,
+  extensionMode?: CompareExtensionMode,
+  compareExtensions?: string[],
+) {
+  const modeExt = extensionMode && extensionMode !== 'none' ? extensionMode : undefined;
+  return invokeOk<CompareResult>('compare_folders', {
+    folders,
+    mode,
+    ignorePatterns,
+    minSizeKb: minSizeKb && minSizeKb > 0 ? minSizeKb : undefined,
+    extensionMode: modeExt === 'include' ? 'include' : modeExt === 'exclude' ? 'exclude' : 'none',
+    compareExtensions: compareExtensions?.map((e) => e.trim().replace(/^\./, '').toLowerCase()).filter(Boolean),
+  });
 }
 
 export async function previewSyncFolders(params: {
@@ -254,8 +275,9 @@ export async function fetchYuqueExportProgress(url: string, saveDir: string, tok
     completed?: number;
     remaining?: number;
     failedCount?: number;
-    status?: string;
-    updatedAt?: string;
+  status?: string;
+  delayUntil?: string;
+  updatedAt?: string;
     startedAt?: string;
     currentSlug?: string | null;
     completedSlugs?: string[];
@@ -293,6 +315,7 @@ export async function exportYuqueBatch(params: {
   stopOnError?: boolean;
   exportOrder?: 'top-down' | 'bottom-up' | 'custom';
   selectedSlugs?: string[];
+  batchLimit?: number;
 }) {
   const storedProgress = params.resume !== false ? loadYuqueProgress(params.url, params.saveDir) : null;
   const result = await invokeOk<{
@@ -307,6 +330,7 @@ export async function exportYuqueBatch(params: {
     resume: boolean;
     stoppedEarly?: boolean;
     paused?: boolean;
+    batchLimitReached?: boolean;
     delayMode: string;
     success: { title: string; filePath: string; folderPath: string | null; relativePath?: string }[];
     failed: { title: string; slug: string; dirPath?: string; message: string }[];
@@ -404,4 +428,41 @@ export async function convertToConfluence(params: {
     skipped: { relativePath: string; outputPath: string }[];
     failed: { relativePath: string; message: string }[];
   }>('confluence_convert', { params });
+}
+
+export async function pickFilePath() {
+  const data = await invokeOk<{ cancelled?: boolean; path?: string }>('pick_file_path');
+  if (data.cancelled) return { cancelled: true as const, path: '' };
+  return { path: data.path || '' };
+}
+
+export async function scanMd5(path: string, minSizeKb?: number, ignorePatterns?: string[]) {
+  const patterns = ignorePatterns ?? loadAppConfig().settings.ignorePatterns;
+  return invokeOk<Md5ScanResult>('scan_md5', {
+    path,
+    minSizeKb: minSizeKb && minSizeKb > 0 ? minSizeKb : undefined,
+    ignorePatterns: patterns,
+  });
+}
+
+export async function exportMd5Manifest(entries: Md5FileEntry[]) {
+  return invokeOk<{ content: string }>('export_md5_manifest', { entries });
+}
+
+export async function batchRenameByMd5(
+  rootPath: string,
+  entries: Md5FileEntry[],
+  mode: Md5RenameMode,
+  dryRun = false,
+) {
+  return invokeOk<Md5RenameResult>('batch_rename_by_md5', {
+    rootPath,
+    entries: entries.map((e) => ({ relativePath: e.relativePath, md5: e.md5 })),
+    mode,
+    dryRun,
+  });
+}
+
+export async function verifyMd5Manifest(entries: Md5FileEntry[], manifestText: string) {
+  return invokeOk<Md5VerifyResult>('verify_md5_manifest', { entries, manifestText });
 }

@@ -1,3 +1,4 @@
+use crate::models::CompareExtensionMode;
 use crate::models::FileMeta;
 use std::collections::HashMap;
 use std::fs;
@@ -62,6 +63,72 @@ pub fn resolve_existing_path(input_path: &str) -> Result<PathBuf, FsError> {
 }
 
 pub fn walk_files(root: &Path, extra_ignore: &[String]) -> HashMap<String, FileMeta> {
+    walk_files_filtered(root, extra_ignore, WalkFilterOptions::default())
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct WalkFilterOptions {
+    pub min_size_bytes: u64,
+    pub extension_mode: CompareExtensionMode,
+    pub extensions: Vec<String>,
+}
+
+impl WalkFilterOptions {
+    pub fn from_min_size_kb(min_size_kb: Option<u64>) -> Self {
+        Self {
+            min_size_bytes: min_size_kb.unwrap_or(0).saturating_mul(1024),
+            ..Default::default()
+        }
+    }
+}
+
+pub fn normalize_extension(ext: &str) -> String {
+    let s = ext.trim().trim_start_matches('.').to_ascii_lowercase();
+    if s == "无后缀" || s == "(无后缀)" {
+        String::new()
+    } else {
+        s
+    }
+}
+
+pub fn extension_key(relative_path: &str) -> String {
+    let name = Path::new(relative_path)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or(relative_path);
+    match name.rfind('.') {
+        Some(i) if i > 0 && i < name.len() - 1 => name[i + 1..].to_ascii_lowercase(),
+        _ => String::new(),
+    }
+}
+
+pub fn matches_extension_filter(
+    relative_path: &str,
+    mode: CompareExtensionMode,
+    extensions: &[String],
+) -> bool {
+    if mode == CompareExtensionMode::None || extensions.is_empty() {
+        return true;
+    }
+    let allowed: Vec<String> = extensions.iter().map(|e| normalize_extension(e)).collect();
+    let file_key = extension_key(relative_path);
+    match mode {
+        CompareExtensionMode::Include => allowed.contains(&file_key),
+        CompareExtensionMode::Exclude => !allowed.contains(&file_key),
+        CompareExtensionMode::None => true,
+    }
+}
+
+pub fn walk_files_filtered(
+    root: &Path,
+    extra_ignore: &[String],
+    options: WalkFilterOptions,
+) -> HashMap<String, FileMeta> {
+    let WalkFilterOptions {
+        min_size_bytes,
+        extension_mode,
+        extensions,
+    } = options;
     let mut files = HashMap::new();
     for entry in WalkDir::new(root).follow_links(false).into_iter().filter_map(|e| e.ok()) {
         let ent = entry.path();
@@ -85,7 +152,13 @@ pub fn walk_files(root: &Path, extra_ignore: &[String]) -> HashMap<String, FileM
             continue;
         }
         let rel_str = rel.to_string_lossy().replace('\\', "/");
+        if !matches_extension_filter(&rel_str, extension_mode, &extensions) {
+            continue;
+        }
         if let Ok(st) = fs::metadata(ent) {
+            if min_size_bytes > 0 && st.len() < min_size_bytes {
+                continue;
+            }
             let mtime = st
                 .modified()
                 .ok()
@@ -106,6 +179,33 @@ pub fn walk_files(root: &Path, extra_ignore: &[String]) -> HashMap<String, FileM
         }
     }
     files
+}
+
+pub fn file_meta_for_path(path: &Path) -> Result<FileMeta, FsError> {
+    let resolved = path.canonicalize().map_err(|e| FsError::Io(e))?;
+    if !resolved.is_file() {
+        return Err(FsError::Message(format!("不是文件: {}", resolved.display())));
+    }
+    let st = fs::metadata(&resolved)?;
+    let mtime = st
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_millis() as f64)
+        .unwrap_or(0.0);
+    let name = resolved
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("file")
+        .to_string();
+    Ok(FileMeta {
+        relative_path: name,
+        absolute_path: resolved.to_string_lossy().into_owned(),
+        size: st.len(),
+        mtime,
+        md5: None,
+        error: None,
+    })
 }
 
 pub fn md5_file(file_path: &Path) -> Result<String, std::io::Error> {
@@ -177,7 +277,7 @@ pub fn unique_file_path(dir: &Path, base_name: &str, ext: &str) -> PathBuf {
     if !candidate.exists() {
         return candidate;
     }
-    let mut i = 1;
+    let mut i = 2;
     loop {
         let next = dir.join(format!("{base_name}_{i}{ext}"));
         if !next.exists() {
@@ -208,5 +308,81 @@ impl IfEmpty for String {
         } else {
             self
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    fn write_temp_file(dir: &Path, name: &str, bytes: &[u8]) -> PathBuf {
+        let path = dir.join(name);
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).unwrap();
+        }
+        let mut f = fs::File::create(&path).unwrap();
+        f.write_all(bytes).unwrap();
+        path
+    }
+
+    #[test]
+    fn walk_files_filtered_skips_files_below_min_size() {
+        let root = tempfile::tempdir().unwrap();
+        write_temp_file(root.path(), "tiny.txt", b"x");
+        write_temp_file(root.path(), "large.bin", &vec![0u8; 2048]);
+
+        let all = walk_files_filtered(root.path(), &[], WalkFilterOptions::default());
+        assert_eq!(all.len(), 2);
+
+        let filtered = walk_files_filtered(
+            root.path(),
+            &[],
+            WalkFilterOptions {
+                min_size_bytes: 1024,
+                ..Default::default()
+            },
+        );
+        assert_eq!(filtered.len(), 1);
+        assert!(filtered.contains_key("large.bin"));
+    }
+
+    #[test]
+    fn walk_files_filtered_include_extensions() {
+        let root = tempfile::tempdir().unwrap();
+        write_temp_file(root.path(), "a.pdf", b"pdf");
+        write_temp_file(root.path(), "b.txt", b"txt");
+        write_temp_file(root.path(), "readme", b"no ext");
+
+        let pdf_only = walk_files_filtered(
+            root.path(),
+            &[],
+            WalkFilterOptions {
+                extension_mode: CompareExtensionMode::Include,
+                extensions: vec!["pdf".into()],
+                ..Default::default()
+            },
+        );
+        assert_eq!(pdf_only.len(), 1);
+        assert!(pdf_only.contains_key("a.pdf"));
+    }
+
+    #[test]
+    fn walk_files_filtered_exclude_extensions() {
+        let root = tempfile::tempdir().unwrap();
+        write_temp_file(root.path(), "a.pdf", b"pdf");
+        write_temp_file(root.path(), "b.txt", b"txt");
+
+        let no_txt = walk_files_filtered(
+            root.path(),
+            &[],
+            WalkFilterOptions {
+                extension_mode: CompareExtensionMode::Exclude,
+                extensions: vec!["txt".into()],
+                ..Default::default()
+            },
+        );
+        assert_eq!(no_txt.len(), 1);
+        assert!(no_txt.contains_key("a.pdf"));
     }
 }
